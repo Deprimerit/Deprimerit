@@ -32,7 +32,7 @@ _AST_CONSTANT = getattr(ast, 'Constant', ())
 _AST_LEGACY = tuple(getattr(ast, k) for k in ('Num', 'Str', 'NameConstant') if hasattr(ast, k)) if sys.version_info < (3, 8) else ()
 _AST_INDEX = getattr(ast, 'Index', ()) if sys.version_info < (3, 9) else ()
 
-VERSION = '3.1'
+VERSION = '3.1.1'
 LANGUAGES = ['Python', 'Pseudocode', 'C', 'C++', 'C#', 'Java', 'JavaScript', 'TypeScript',
              'Go', 'Kotlin', 'Swift', 'PHP', 'R', 'MATLAB']
 # Every language can be generated AND parsed back, so code converts between any two.
@@ -2358,6 +2358,11 @@ class PyGen(Gen):
          'char': '({0})[{1}]', 'random': 'random.randrange({0})', 'min': 'min({0}, {1})',
          'max': 'max({0}, {1})', 'sgn': '((({0}) > 0) - (({0}) < 0))',
          'toupper': '({0}).upper()', 'tolower': '({0}).lower()', 'trim': '({0}).strip()', 'contains': '(({1}) in ({0}))'}
+
+    def main_open(self):
+        if not self.funcs[0]['body']:
+            self.emit('# Main is empty. Add shapes or import code to build a program.')
+            self.emit('pass')
 
     def header(self):
         text = '\n'.join(self.lines)
@@ -9686,7 +9691,7 @@ def launch_gui(initial_path=None):
             viewmenu.add_command(label='Toggle light / dark theme', command=self.toggle_theme)
             viewmenu.add_separator()
             viewmenu.add_command(label='Symbols and outline', command=self.toggle_symbols, accelerator='Ctrl+Shift+B')
-            viewmenu.add_command(label='Source code', command=lambda: self.show_tools(0, True), accelerator='Ctrl+L')
+            viewmenu.add_command(label='Generated code', command=self.show_generated_code, accelerator='Ctrl+L')
             viewmenu.add_command(label='Console and variables', command=lambda: self.show_tools(1, True))
             menu.add_cascade(label='View', menu=viewmenu)
             helpmenu = tk.Menu(menu, tearoff=False)
@@ -9723,8 +9728,8 @@ def launch_gui(initial_path=None):
             self.speed_box.pack(side='left')
             self.speed_box.bind('<<ComboboxSelected>>', self.change_speed)
             separator()
-            tool('source', 'Source code (Ctrl+L)', lambda: self.show_tools(0, True))
-            ttk.Button(toolbar, text='Source code', command=lambda: self.show_tools(0, True), style='Tool.TButton').pack(side='left')
+            tool('source', 'Generate and show code (Ctrl+L)', self.show_generated_code)
+            ttk.Button(toolbar, text='Generate code', command=self.show_generated_code, style='Tool.TButton').pack(side='left')
             tool('console', 'Console and variables', lambda: self.show_tools(1, True))
             ttk.Button(toolbar, text='Symbols', command=self.toggle_symbols, style='Tool.TButton').pack(side='left', padx=(5, 0))
             ttk.Button(toolbar, text='Import code...', command=self.import_source, style='Tool.TButton').pack(side='right')
@@ -9809,15 +9814,16 @@ def launch_gui(initial_path=None):
             self.notebook = ttk.Notebook(right)
             self.notebook.pack(fill='both', expand=True)
             sourcepage, consolepage = ttk.Frame(self.notebook), ttk.Frame(self.notebook)
-            self.notebook.add(sourcepage, text='Source code')
+            self.notebook.add(sourcepage, text='Generated code')
             self.notebook.add(consolepage, text='Console & variables')
             language_row = ttk.Frame(sourcepage, padding=(0, 7))
             language_row.pack(fill='x')
+            ttk.Label(language_row, text='Language').pack(side='left', padx=(0, 6))
             self.language_box = ttk.Combobox(language_row, textvariable=self.language, values=LANGUAGES, state='readonly', width=15)
             self.language_box.pack(side='left', fill='x', expand=True)
             self.language_box.bind('<<ComboboxSelected>>', self.language_changed)
-            ttk.Button(language_row, text='Export', command=self.export_code).pack(side='left', padx=4)
-            ttk.Button(language_row, text='Copy', command=self.copy_code).pack(side='left')
+            ttk.Button(language_row, text='Export', width=7, command=self.export_code).pack(side='left', padx=4)
+            ttk.Button(language_row, text='Copy', width=5, command=self.copy_code).pack(side='left')
             sync_row = ttk.Frame(sourcepage)
             sync_row.pack(fill='x', side='bottom', pady=(6, 0))
             ttk.Button(sync_row, text='Apply to chart', command=self.apply_code).pack(side='left')
@@ -9859,7 +9865,7 @@ def launch_gui(initial_path=None):
             debug_panes.add(variables_area, weight=2)
             self.status_label = ttk.Label(self.root, textvariable=self.status, anchor='w', padding=(12, 6))
             self.status_label.pack(fill='x')
-            for binding, cmd in [('<Control-n>', self.new), ('<Control-o>', self.open), ('<Control-s>', self.save), ('<Control-l>', lambda: self.show_tools(0, True)), ('<Control-Shift-B>', self.toggle_symbols), ('<F5>', self.run), ('<F6>', self.step), ('<Escape>', self.pause), ('<Control-plus>', lambda: self.set_zoom(1.15)), ('<Control-equal>', lambda: self.set_zoom(1.15)), ('<Control-minus>', lambda: self.set_zoom(1 / 1.15)), ('<Control-0>', self.reset_zoom)]:
+            for binding, cmd in [('<Control-n>', self.new), ('<Control-o>', self.open), ('<Control-s>', self.save), ('<Control-l>', self.show_generated_code), ('<Control-Shift-B>', self.toggle_symbols), ('<F5>', self.run), ('<F6>', self.step), ('<Escape>', self.pause), ('<Control-plus>', lambda: self.set_zoom(1.15)), ('<Control-equal>', lambda: self.set_zoom(1.15)), ('<Control-minus>', lambda: self.set_zoom(1 / 1.15)), ('<Control-0>', self.reset_zoom)]:
                 self.root.bind(binding, lambda e, c=cmd: c())
             for widget in (self.tree, self.canvas):
                 for binding, cmd in [('<Delete>', self.delete), ('<Control-z>', self.undo), ('<Control-y>', self.redo), ('<Control-c>', self.copy), ('<Control-v>', self.paste), ('<Control-x>', self.cut), ('<F9>', self.toggle_breakpoint)]:
@@ -9919,6 +9925,17 @@ def launch_gui(initial_path=None):
             widget.bind('<Leave>', hide)
             widget.bind('<ButtonPress>', hide, add='+')
 
+        def show_generated_code(self):
+            self.show_tools(0)
+            if not self.sync_source():
+                return False
+            self.update_code()
+            if self.source is None:
+                self.status.set('Cannot generate ' + self.language.get() + ' code. See the error in the code panel.')
+                return False
+            self.status.set('Generated ' + self.language.get() + ' code. Use Copy or Export to save it.')
+            return True
+
         def show_tools(self, tab=0, toggle=False):
             if toggle and self.tools_visible and self.notebook.index('current') == tab:
                 self.hide_tools()
@@ -9957,7 +9974,7 @@ def launch_gui(initial_path=None):
                 return
             language = detect_language(path)
             if not language:
-                messagebox.showerror('Unknown source language', 'Choose a supported source file, or paste code into the Source code panel.', parent=self.root)
+                messagebox.showerror('Unknown source language', 'Choose a supported source file, or paste code into the Generated code panel.', parent=self.root)
                 return
             try:
                 with open(path, 'r', encoding='utf-8-sig') as stream:
@@ -10140,6 +10157,7 @@ def launch_gui(initial_path=None):
             self.draw()
             if not keep_code:
                 self.update_code()
+                self.show_tools(0)
 
         def selection(self):
             items = self.tree.selection()
@@ -11312,7 +11330,8 @@ def launch_gui(initial_path=None):
             self.show_text('Expressions and usage', '''Python source uses normal Python syntax and dynamic values: no declarations needed.
 Use ** for powers, ^ for bitwise XOR, == for equality.
 Lists, tuples, dictionaries, sets, slices and iterable for loops are supported.
-Paste code using Source code (Ctrl+L), or use Import code.
+The Generated code panel opens automatically. Use Generate code (Ctrl+L)
+to reopen or refresh it, or Import code to load a program.
 Native Python collection charts save as JSON; advanced constructs may not
 convert to the portable subset used by other language exporters.
 
