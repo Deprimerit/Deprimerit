@@ -22,7 +22,12 @@ PROGRAMS = [
     ('dictionary items', "r={'a':1,'b':2}\nfor k,v in r.items():print(k,v)\n"),
     ('string', "r='abc'\nfor i in r:print(i)\n"),
     ('list', "r=[2,4,6]\nfor i in r:print(i)\n"),
+    ('inline dictionary lookup', "key=input('Key: ')\nprint({'a':10,'b':20}[key])\n"),
+    ('named dynamic dictionary lookup', "r={'a':10,'b':20}\nkey=input('Key: ')\nprint(r[key])\n"),
 ]
+with io.open(os.path.join(os.path.dirname(APP_PATH), 'examples', 'alphabet_letters.py'),
+             encoding='utf-8') as stream:
+    PROGRAMS.append(('alphabet letter program', stream.read()))
 checks, failures = [], []
 original_mainloop = tk.Tk.mainloop
 

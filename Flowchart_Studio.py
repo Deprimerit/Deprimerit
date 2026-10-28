@@ -32,7 +32,7 @@ _AST_CONSTANT = getattr(ast, 'Constant', ())
 _AST_LEGACY = tuple(getattr(ast, k) for k in ('Num', 'Str', 'NameConstant') if hasattr(ast, k)) if sys.version_info < (3, 8) else ()
 _AST_INDEX = getattr(ast, 'Index', ()) if sys.version_info < (3, 9) else ()
 
-VERSION = '3.1.3'
+VERSION = '3.1.4'
 LANGUAGES = ['Python', 'Pseudocode', 'C', 'C++', 'C#', 'Java', 'JavaScript', 'TypeScript',
              'Go', 'Kotlin', 'Swift', 'PHP', 'R', 'MATLAB']
 # Every language can be generated AND parsed back, so code converts between any two.
@@ -1400,7 +1400,12 @@ class Interpreter(object):
             'min': min, 'max': max, 'sgn': lambda x: (x > 0) - (x < 0),
             'toupper': lambda s: str(s).upper(), 'tolower': lambda s: str(s).lower(),
             'trim': lambda s: str(s).strip(), 'contains': lambda s, t: str(t) in str(s),
-            'ord': lambda s: ord(str(s)[0]), 'chr': lambda n: chr(int(n))}
+            'ord': lambda s: ord(str(s)[0]), 'chr': lambda n: chr(int(n)),
+            'flowdictionaryerror': self.dictionary_error}
+
+    @staticmethod
+    def dictionary_error(message):
+        raise FlowError(str(message))
 
     def tick(self):
         self.count += 1
@@ -1627,7 +1632,7 @@ class Returned(Exception):
 BUILTIN_KEYS = {'abs', 'sqrt', 'sin', 'cos', 'tan', 'arcsin', 'arccos', 'arctan',
                 'log', 'log10', 'floor', 'ceiling', 'round', 'int', 'tointeger', 'toupper', 'tolower', 'trim', 'contains',
                 'toreal', 'float', 'tostring', 'str', 'toboolean', 'len', 'length',
-                'size', 'char', 'random', 'min', 'max', 'sgn', 'ord', 'chr'}
+                'size', 'char', 'random', 'min', 'max', 'sgn', 'ord', 'chr', 'flowdictionaryerror'}
 ALIASES = {'tointeger': 'int', 'float': 'toreal', 'str': 'tostring',
            'length': 'len', 'size': 'len'}
 SCALAR_TYPES = ('Integer', 'Real', 'String', 'Boolean')
@@ -2005,6 +2010,14 @@ class Gen(object):
 
     def builtin_code(self, key, args, types):
         t = types[0] if types else None
+        if key == 'flowdictionaryerror':
+            # Raising through an empty lookup also remains valid in the
+            # restricted Python interpreter, without executing arbitrary code.
+            if self.lang == 'Python':
+                return '({})[' + args[0] + ']'
+            if self.lang == 'MATLAB':
+                return 'error(' + args[0] + ')'
+            return 'flowDictionaryError(' + args[0] + ')'
         if key == 'tostring':
             return self.tostr(args[0], t)
         if key == 'int':
@@ -2264,12 +2277,47 @@ class Gen(object):
 
     def build(self):
         self.pre_build()
+        self.emit_dictionary_error_helper()
         for f in self.funcs[1:]:
             self.function(f)
             self.emit()
         self.main_open()
         self.body(self.funcs[0])
         self.main_close()
+
+    def emit_dictionary_error_helper(self):
+        """A failed fixed-map search must stop before the array access."""
+        needed = False
+        for f in self.funcs:
+            for n in walk(f['body']):
+                if n['kind'] != 'Call':
+                    continue
+                call = parse_expr(n['expression'])
+                if isinstance(call, ast.Call) and call.func.id.lower() == 'flowdictionaryerror':
+                    needed = True
+                    break
+        if not needed or self.lang in ('Python', 'MATLAB', 'Pseudocode'):
+            return
+        helpers = {
+            'C': ['static void flowDictionaryError(const char *message) {',
+                  '    fprintf(stderr, "%s\\n", message);', '    exit(EXIT_FAILURE);', '}'],
+            'C++': ['void flowDictionaryError(const std::string& message) {',
+                    '    std::cerr << message << std::endl;', '    std::exit(EXIT_FAILURE);', '}'],
+            'JavaScript': ['function flowDictionaryError(message) { throw new Error(message); }'],
+            'TypeScript': ['function flowDictionaryError(message: string): never { throw new Error(message); }'],
+            'Java': ['static void flowDictionaryError(String message) { throw new IllegalArgumentException(message); }'],
+            'C#': ['static void flowDictionaryError(string message) { throw new ArgumentException(message); }'],
+            'PHP': ['function flowDictionaryError($message) { throw new RuntimeException($message); }'],
+            'Go': ['func flowDictionaryError(message string) { panic(message) }'],
+            'Kotlin': ['fun flowDictionaryError(message: String): Nothing { error(message) }'],
+            'Swift': ['func flowDictionaryError(_ message: String) -> Never { fatalError(message) }'],
+            'R': ['flowDictionaryError <- function(message) { stop(message, call. = FALSE) }'],
+        }
+        self.emit(self.cm + ' ' + HELP_BEGIN)
+        for line in helpers[self.lang]:
+            self.emit(line)
+        self.emit(self.cm + ' ' + HELP_END)
+        self.emit()
 
     def pre_build(self):
         pass
@@ -4323,7 +4371,9 @@ MATH_MAP = {'sqrt': 'Sqrt', 'sin': 'Sin', 'cos': 'Cos', 'tan': 'Tan', 'asin': 'A
             'atan': 'Arctan', 'log': 'Log', 'log10': 'Log10', 'floor': 'Floor', 'ceil': 'Ceiling',
             'fabs': 'Abs'}
 BUILTIN_MAP = {'str': 'ToString', 'int': 'ToInteger', 'float': 'ToReal', 'len': 'Length', 'abs': 'Abs',
-               'round': 'Round', 'min': 'Min', 'max': 'Max', 'ord': 'Ord', 'chr': 'Chr'}
+               'round': 'Round', 'min': 'Min', 'max': 'Max', 'ord': 'Ord', 'chr': 'Chr',
+               'flowDictionaryError': 'FlowDictionaryError', 'FlowDictionaryError': 'FlowDictionaryError',
+               'error': 'FlowDictionaryError'}
 PREC = {'or': 1, 'and': 2, 'not': 3, 'cmp': 4, 'cat': 5, 'add': 6, 'mul': 7, 'neg': 8, 'pow': 9, 'atom': 100}
 
 
@@ -4399,7 +4449,7 @@ class PyImporter(object):
             return (self.infer(n.elt, sc), True)
         if isinstance(n, ast.List):
             t = None
-            for e in n.elts:
+            for e in getattr(n, '_portable_type_values', n.elts):
                 t = join_type(t, self.infer(e, self.cur_scope), 'list')
             return (t, True)
         if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Mult):
@@ -4663,6 +4713,8 @@ class PyImporter(object):
         ok, v = cval(n)
         if ok and isinstance(v, (int, float)) and not isinstance(v, bool):
             return ('true' if v else 'false'), PREC['atom']
+        if self.ctype(n) == 'String':
+            return 'Length(' + self.S(n) + ') != 0', PREC['cmp']
         if not isinstance(n, (ast.Compare, ast.BoolOp, ast.UnaryOp)) and self.ctype(n) in ('Integer', 'Real') \
                 and not (isinstance(n, ast.Call) and getattr(n.func, 'id', '') in ('input',)):
             return self.S(n, PREC['cmp']) + ' != 0', PREC['cmp']
@@ -4679,6 +4731,8 @@ class PyImporter(object):
         if n.keywords or any(isinstance(a, ast.Starred) for a in n.args):
             self.fail(n, 'keyword/star arguments are not supported')
         args = [self.S(a) for a in n.args]
+        if getattr(n, '_portable_fail', False):
+            return 'FlowDictionaryError(' + ', '.join(args) + ')'
         f = n.func
         if isinstance(f, ast.Name):
             if f.id in self.funcs:
@@ -4866,6 +4920,8 @@ class PyImporter(object):
             return []
         if isinstance(v, ast.Call):
             f = v.func
+            if getattr(v, '_portable_fail', False) or (isinstance(f, ast.Name) and f.id in ('flowDictionaryError', 'FlowDictionaryError', 'error') and f.id not in self.funcs):
+                return [node('Call', expression=self.U(v)[0])]
             if isinstance(f, ast.Name) and f.id == 'print':
                 return [self.print_node(v)]
             if isinstance(f, ast.Name) and f.id in ('exit', 'quit'):
@@ -5011,7 +5067,7 @@ class PyImporter(object):
         t = el[0] or 'Integer'
         v = s.value
         if isinstance(v, ast.List):
-            d = self.declare_nodes(name, t, True, str(len(v.elts)))
+            d = self.declare_nodes(name, t, True, str(getattr(v, '_portable_size', len(v.elts))))
             nodes = [d] + [node('Assign', variable='{0}[{1}]'.format(name, i), expression=self.U(e)[0]) for i, e in enumerate(v.elts)]
         else:
             lst, cnt = (v.left, v.right) if isinstance(v.left, ast.List) else (v.right, v.left)
@@ -5436,9 +5492,9 @@ def parse_python(text):
 def lower_portable_collections(tree):
     """Lower collection representation; keep all element evaluation in the program.
 
-    Dictionaries use parallel key/value arrays. No user program is evaluated
-    while translating. Dictionary keys must be unique scalar literals so their
-    shape is representable by the portable fixed-array model.
+    Dictionaries use parallel key/value arrays. Their fixed storage is declared
+    once; entries are evaluated in source order in their original control scope.
+    No user program is evaluated while translating. Keys are scalar literals.
     """
     class Collections(object):
         def __init__(self):
@@ -5465,6 +5521,11 @@ def lower_portable_collections(tree):
         def call(self, name, args):
             return ast.Call(func=self.name(name), args=args, keywords=[])
 
+        def failure(self, message):
+            call = self.call('Fail', [K(message)])
+            call._portable_fail = True
+            return ast.Expr(value=call)
+
         def index(self, base, key, store=False):
             if _AST_INDEX:
                 key = ast.Index(value=key)
@@ -5473,9 +5534,35 @@ def lower_portable_collections(tree):
         def fail(self, n, message):
             raise Unsupported('Line {0}: {1}'.format(getattr(n, 'lineno', '?'), message))
 
+        def checked(self, desc, original):
+            if desc and desc['kind'] == 'conditional':
+                self.fail(original, 'this dictionary or range has different bindings on different control paths; keep its lookup in the branch or loop that creates it')
+            return desc
+
+        def merge_env(self, left, right):
+            merged = {}
+            for variable in set(left) | set(right):
+                first, second = left.get(variable), right.get(variable)
+                if first is second:
+                    if first is not None:
+                        merged[variable] = first
+                elif any(desc and desc['kind'] in ('dict', 'range', 'conditional') for desc in (first, second)):
+                    merged[variable] = {'kind': 'conditional'}
+                elif first and second and first.get('string') == second.get('string'):
+                    merged[variable] = first
+            return merged
+
+        def loop_blocks(self, statement, depth):
+            before = self.env.copy()
+            statement.body = self.block(statement.body, depth + 1)
+            body_env = self.env.copy()
+            self.env = self.merge_env(before, body_env)
+            statement.orelse = self.block(statement.orelse, depth + 1)
+            self.env = self.merge_env(body_env, self.env)
+
         def sequence(self, value, prefix, depth):
             if isinstance(value, ast.Name) and value.id in self.env:
-                return self.env[value.id]
+                return self.checked(self.env[value.id], value)
             if isinstance(value, ast.Dict):
                 return self.dictionary(value, prefix, depth)
             if isinstance(value, (ast.List, ast.Tuple)):
@@ -5506,58 +5593,156 @@ def lower_portable_collections(tree):
             return {'kind': 'sequence', 'expr': transformed, 'string': is_string}
 
         def dictionary(self, value, prefix, depth):
-            keys, values, known = [], [], []
+            keys, values, known, entries = [], [], [], []
             for key, item in zip(value.keys, value.values):
                 if key is None:
                     self.fail(value, 'expanded dictionaries need a dynamic target map and are not portable')
                 ok, scalar = cval(key)
                 if not ok or not isinstance(scalar, (str, int, float, bool)):
                     self.fail(key, 'portable dictionary keys must be scalar literals')
-                if any(scalar == previous for previous in known):
-                    self.fail(key, 'duplicate dictionary keys need explicit portable conversion')
-                known.append(scalar)
-                keys.append(copy.deepcopy(key))
-                values.append(self.expr(item, prefix, depth))
+                positions = [i for i, previous in enumerate(known) if scalar == previous]
+                if positions:
+                    index = positions[0]
+                else:
+                    index = len(known)
+                    known.append(scalar)
+                    keys.append(copy.deepcopy(key))
+                entries.append((index, item))
             key_name, value_name = self.fresh('keys'), self.fresh('values')
             key_assign = self.assign(key_name, ast.List(elts=keys, ctx=ast.Load()))
-            value_assign = self.assign(value_name, ast.List(elts=values, ctx=ast.Load()))
-            if depth:
-                if not all(cval(x)[0] for x in values):
-                    self.fail(value, 'nested dictionary literals need scalar literal values for portable conversion')
-                self.hoisted.extend([key_assign, value_assign])
-            else:
-                prefix.extend([key_assign, value_assign])
+            # A private allocation hint separates type inference and fixed-size
+            # declaration from evaluation. Empty initializer elements cannot run
+            # user expressions before their enclosing loop/branch is entered.
+            storage = ast.List(elts=[], ctx=ast.Load())
+            storage._portable_size = len(known)
+            storage._portable_type_values = values
+            value_assign = self.assign(value_name, storage)
+            self.hoisted.extend([key_assign, value_assign])
+            last_positions = dict((index, position) for position, (index, item) in enumerate(entries))
+            for position, (index, item) in enumerate(entries):
+                transformed = self.expr(item, prefix, depth)
+                if last_positions[index] != position:
+                    # Overwritten entries still execute (and may raise), but
+                    # their temporary type need not match the final value.
+                    self.snapshot(transformed, prefix, 'overwritten')
+                else:
+                    values.append(copy.deepcopy(transformed))
+                    prefix.append(self.assign(self.index(self.name(value_name), K(index), True), transformed))
             return {'kind': 'dict', 'keys': self.name(key_name), 'values': self.name(value_name), 'known': known}
 
-        def dictionary_index(self, desc, key, original):
+        def dictionary_index(self, desc, key, original, prefix, depth, required=True):
             ok, scalar = cval(key)
             if ok:
                 for index, candidate in enumerate(desc['known']):
                     if scalar == candidate:
                         return K(index)
-                self.fail(original, 'dictionary key is not present in this fixed dictionary')
+                if required:
+                    prefix.append(self.failure('Dictionary key not found: ' + str(scalar)))
+                return K(len(desc['known']))
             if isinstance(key, ast.Name):
                 bound = self.key_indices.get(key.id)
                 if bound and bound[0] is desc:
                     return self.name(bound[1])
-            self.fail(original, 'dynamic dictionary lookup requires a target map; iterate items() for portable conversion')
+            key_name, index_name = self.fresh('lookup_key'), self.fresh('lookup_index')
+            prefix.append(self.assign(key_name, key))
+            prefix.append(self.assign(index_name, K(len(desc['known']))))
+            for index, candidate in enumerate(desc['known']):
+                test = ast.Compare(left=self.name(key_name), ops=[ast.Eq()], comparators=[K(candidate)])
+                prefix.append(ast.If(test=test, body=[self.assign(index_name, K(index))], orelse=[]))
+            if required:
+                missing = ast.Compare(left=self.name(index_name), ops=[ast.Eq()], comparators=[K(len(desc['known']))])
+                prefix.append(ast.If(test=missing, body=[self.failure('Dictionary key not found')], orelse=[]))
+            return self.name(index_name)
+
+        def snapshot(self, value, prefix, role='value'):
+            temp = self.fresh(role)
+            prefix.append(self.assign(temp, value))
+            return self.name(temp)
+
+        def ordered(self, children, prefix, depth):
+            result = []
+            for child in children:
+                before = []
+                changed = self.expr(child, before, depth)
+                if before:
+                    # Earlier reads/calls precede a later child's statements.
+                    # In particular f(), {'a': g()}[key] must call f before g.
+                    for i, prior in enumerate(result):
+                        if not cval(prior)[0]:
+                            result[i] = self.snapshot(prior, prefix)
+                    prefix.extend(before)
+                result.append(changed)
+            return result
 
         def expr(self, value, prefix, depth):
             if value is None:
                 return None
             if isinstance(value, ast.Name):
-                desc = self.env.get(value.id)
+                desc = self.checked(self.env.get(value.id), value)
                 if desc and desc['kind'] in ('dict', 'range'):
                     self.fail(value, 'a dictionary or range value can be iterated but cannot be used as a scalar in portable code')
                 return value
-            if isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name):
-                desc = self.env.get(value.value.id)
+            if isinstance(value, ast.Subscript):
+                desc = (self.dictionary(value.value, prefix, depth) if isinstance(value.value, ast.Dict)
+                        else self.env.get(value.value.id) if isinstance(value.value, ast.Name) else None)
+                self.checked(desc, value)
                 if desc and desc['kind'] == 'dict':
-                    key = pslice(value)
-                    return self.index(desc['values'], self.dictionary_index(desc, key, value), isinstance(value.ctx, ast.Store))
+                    key = self.expr(pslice(value), prefix, depth)
+                    return self.index(desc['values'], self.dictionary_index(desc, key, value, prefix, depth), isinstance(value.ctx, ast.Store))
+                if not isinstance(pslice(value), ast.Slice):
+                    base, key = self.ordered([value.value, pslice(value)], prefix, depth)
+                    return self.index(base, key, isinstance(value.ctx, ast.Store))
+            if isinstance(value, ast.IfExp):
+                test = self.expr(value.test, prefix, depth)
+                yes, no = [], []
+                body, other = self.expr(value.body, yes, depth), self.expr(value.orelse, no, depth)
+                if yes or no:
+                    temp = self.fresh('conditional')
+                    prefix.append(ast.If(test=test, body=yes + [self.assign(temp, body)], orelse=no + [self.assign(temp, other)]))
+                    return self.name(temp)
+                value.test, value.body, value.orelse = test, body, other
+                return value
+            if isinstance(value, ast.BoolOp):
+                pieces = []
+                for part in value.values:
+                    before = []
+                    pieces.append((before, self.expr(part, before, depth)))
+                if any(before for before, part in pieces):
+                    temp = self.fresh('boolean')
+                    first, part = pieces[0]
+                    prefix.extend(first + [self.assign(temp, part)])
+                    for before, part in pieces[1:]:
+                        test = self.name(temp)
+                        if isinstance(value.op, ast.Or):
+                            test = ast.UnaryOp(op=ast.Not(), operand=test)
+                        prefix.append(ast.If(test=test, body=before + [self.assign(temp, part)], orelse=[]))
+                    return self.name(temp)
+                value.values = [part for before, part in pieces]
+                return value
+            if isinstance(value, ast.Compare) and len(value.ops) > 1:
+                children = []
+                for child in [value.left] + value.comparators:
+                    before = []
+                    children.append((before, self.expr(child, before, depth)))
+                if any(before for before, part in children):
+                    before, first = children[0]
+                    prefix.extend(before)
+                    previous = self.snapshot(first, prefix, 'comparison')
+                    temp = self.fresh('compared')
+                    prefix.append(self.assign(temp, K(True)))
+                    for op, (before, part) in zip(value.ops, children[1:]):
+                        branch = list(before)
+                        current = self.snapshot(part, branch, 'comparison')
+                        branch.append(self.assign(temp, ast.Compare(left=previous, ops=[op], comparators=[current])))
+                        branch.append(self.assign(previous.id, current))
+                        prefix.append(ast.If(test=self.name(temp), body=branch, orelse=[]))
+                    return self.name(temp)
+                value.left, value.comparators = children[0][1], [part for before, part in children[1:]]
+                return value
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == 'len' and len(value.args) == 1:
                 arg = value.args[0]
-                desc = self.env.get(arg.id) if isinstance(arg, ast.Name) else None
+                desc = (self.dictionary(arg, prefix, depth) if isinstance(arg, ast.Dict)
+                        else self.env.get(arg.id) if isinstance(arg, ast.Name) else None)
                 if desc and desc['kind'] == 'dict':
                     return self.call('len', [copy.deepcopy(desc['keys'])])
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
@@ -5567,13 +5752,30 @@ def lower_portable_collections(tree):
                     self.fail(value, 'dictionary methods are portable when used in keys(), values() or items() iteration')
             if isinstance(value, ast.Dict):
                 self.fail(value, 'use a named dictionary or iterate its keys, values or items for portable conversion')
+            if isinstance(value, ast.Call):
+                # Named function objects are not portable values. Only their
+                # receiver/arguments take part in expression evaluation.
+                if isinstance(value.func, ast.Attribute):
+                    value.func.value = self.expr(value.func.value, prefix, depth)
+                args = list(value.args) + [keyword.value for keyword in value.keywords]
+                changed = self.ordered(args, prefix, depth)
+                value.args = changed[:len(value.args)]
+                for keyword, part in zip(value.keywords, changed[len(value.args):]):
+                    keyword.value = part
+                return value
+            children, slots = [], []
             for field, child in ast.iter_fields(value):
                 if isinstance(child, ast.expr):
-                    setattr(value, field, self.expr(child, prefix, depth))
+                    children.append(child); slots.append((field, None))
                 elif isinstance(child, list):
-                    setattr(value, field, [self.expr(x, prefix, depth) if isinstance(x, ast.expr) else x for x in child])
-                elif isinstance(child, ast.keyword):
-                    child.value = self.expr(child.value, prefix, depth)
+                    for i, part in enumerate(child):
+                        if isinstance(part, ast.expr):
+                            children.append(part); slots.append((field, i))
+            for (field, index), changed in zip(slots, self.ordered(children, prefix, depth)):
+                if index is None:
+                    setattr(value, field, changed)
+                else:
+                    getattr(value, field)[index] = changed
             return value
 
         def bind(self, target, expression):
@@ -5593,9 +5795,8 @@ def lower_portable_collections(tree):
             original_indices = self.key_indices.copy()
             iterable = statement.iter
             if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and iterable.func.id == 'range':
-                statement.body = self.block(statement.body, depth + 1)
-                statement.orelse = self.block(statement.orelse, depth + 1)
                 statement.iter = self.expr(iterable, prefix, depth)
+                self.loop_blocks(statement, depth)
                 return prefix + [statement]
             enum_start = None
             if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and iterable.func.id == 'enumerate':
@@ -5608,8 +5809,7 @@ def lower_portable_collections(tree):
                 if enum_start is not None:
                     self.fail(statement, 'enumerate over an assigned range needs an explicit range loop for portable conversion')
                 statement.iter = copy.deepcopy(desc['expr'])
-                statement.body = self.block(statement.body, depth + 1)
-                statement.orelse = self.block(statement.orelse, depth + 1)
+                self.loop_blocks(statement, depth)
                 return prefix + [statement]
             if desc['kind'] == 'dict':
                 desc = {'kind': 'keys', 'dict': desc}
@@ -5635,8 +5835,9 @@ def lower_portable_collections(tree):
             if enum_start is not None:
                 element = ast.Tuple(elts=[ast.BinOp(left=copy.deepcopy(enum_start), op=ast.Add(), right=self.name(index)), element], ctx=ast.Load())
             binding = self.bind(statement.target, element)
-            body = binding + self.block(statement.body, depth + 1)
-            orelse = self.block(statement.orelse, depth + 1)
+            self.loop_blocks(statement, depth)
+            body = binding + statement.body
+            orelse = statement.orelse
             self.key_indices = original_indices
             loop = ast.For(target=self.name(index, True), iter=self.call('range', [self.call('len', [copy.deepcopy(seq)])]), body=body, orelse=orelse)
             ast.copy_location(loop, statement)
@@ -5660,8 +5861,6 @@ def lower_portable_collections(tree):
                 if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
                     name, value = statement.targets[0].id, statement.value
                     if isinstance(value, ast.Dict):
-                        if depth:
-                            self.fail(statement, 'named dictionaries must be created at the top level of a program or function for portable conversion')
                         self.env[name] = self.dictionary(value, prefix, depth)
                         result.extend(prefix)
                         continue
@@ -5703,14 +5902,36 @@ def lower_portable_collections(tree):
                     statement.value = transformed_value
                 elif isinstance(statement, (ast.If, ast.While)):
                     statement.test = self.expr(statement.test, prefix, depth)
-                    statement.body = self.block(statement.body, depth + 1)
-                    statement.orelse = self.block(statement.orelse, depth + 1)
+                    if isinstance(statement, ast.While):
+                        self.loop_blocks(statement, depth)
+                    else:
+                        before = self.env.copy()
+                        statement.body = self.block(statement.body, depth + 1)
+                        yes_env = self.env.copy()
+                        self.env = before.copy()
+                        statement.orelse = self.block(statement.orelse, depth + 1)
+                        self.env = self.merge_env(yes_env, self.env)
+                    if isinstance(statement, ast.While) and prefix:
+                        # A condition dictionary is rebuilt on every test,
+                        # including tests reached through continue. Move the
+                        # original else onto the false-condition path so user
+                        # breaks still skip it.
+                        stop = ast.If(test=ast.UnaryOp(op=ast.Not(), operand=statement.test),
+                                      body=statement.orelse + [ast.Break()], orelse=[])
+                        statement.test = K(True)
+                        statement.body = prefix + [stop] + statement.body
+                        statement.orelse = []
+                        prefix = []
                 elif isinstance(statement, ast.AugAssign):
                     statement.target = self.expr(statement.target, prefix, depth)
                     statement.value = self.expr(statement.value, prefix, depth)
                 elif isinstance(statement, ast.Assign):
-                    statement.targets = [self.expr(t, prefix, depth) for t in statement.targets]
                     statement.value = self.expr(statement.value, prefix, depth)
+                    before = []
+                    statement.targets = [self.expr(t, before, depth) for t in statement.targets]
+                    if before:
+                        statement.value = self.snapshot(statement.value, prefix)
+                        prefix.extend(before)
                 elif isinstance(statement, ast.Expr):
                     statement.value = self.expr(statement.value, prefix, depth)
                 elif isinstance(statement, ast.Return):
@@ -5814,9 +6035,6 @@ def lower_portable_controls(tree):
                 pre, test = self.expr(value.test, True)
                 bp, body = self.expr(value.body, truth)
                 ep, other = self.expr(value.orelse, truth)
-                if not bp and not ep and not truth:
-                    value.test, value.body, value.orelse = test, body, other
-                    return pre, value
                 if truth:
                     body = ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=body))
                     other = ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=other))
@@ -5825,7 +6043,16 @@ def lower_portable_controls(tree):
                 return pre, self.name(name)
             if isinstance(value, ast.BoolOp):
                 pieces = [self.expr(v, truth) for v in value.values]
-                if not any(p for p,v in pieces):
+                def boolean_result(part):
+                    ok, literal_value = cval(part)
+                    return (isinstance(part, ast.Compare) or
+                            isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not) or
+                            ok and isinstance(literal_value, bool) or
+                            isinstance(part, ast.BoolOp) and all(boolean_result(x) for x in part.values))
+                # Python returns an operand from and/or. Only a condition (or
+                # operands already known to be Boolean) can use the portable
+                # Boolean operators without losing the original value.
+                if not any(p for p,v in pieces) and (truth or all(boolean_result(v) for p,v in pieces)):
                     value.values = [v for p,v in pieces]
                     return [], value
                 if truth:
@@ -9595,9 +9822,9 @@ class MatlabFront(RMBase):
             self.adv()
             return ast.List(elts=items)
         if k == 'id':
-            if v == 'true':
+            if v == 'true' and not self.is_op('('):
                 return K(True)
-            if v == 'false':
+            if v == 'false' and not self.is_op('('):
                 return K(False)
             if v == 'pi':
                 return MEMBER(NM('math'), 'pi')
@@ -9780,8 +10007,12 @@ PHP, R and MATLAB. Conversion uses a finite subset of each language. Python
 charts lower nested input, snapshotted range bounds and signed steps into
 explicit portable operations. Homogeneous list/tuple/string iteration, enumerate,
 and fixed dictionaries represented by parallel key/value arrays are supported.
-Dictionary keys must be unique scalar literals, and array element types must
-fit the portable scalar model. Dynamic map resizing, heterogeneous collections,
+Named and inline dictionary lookups accept runtime keys. Dictionary entries are
+evaluated eagerly in source order, including repeated keys, inside their original
+loop or branch; a missing lookup key stops execution with an error. Dictionary
+keys must be scalar literals, and array element types must fit the portable
+scalar model. Python and/or retain operand values and short-circuit evaluation.
+Dynamic map resizing, heterogeneous collections,
 and unsupported library features still report a conversion error. Target-parser validation
 does not prove external-compiler acceptance or semantic equivalence. Compiler
 and runtime availability varies by machine; no external compiler is bundled.
