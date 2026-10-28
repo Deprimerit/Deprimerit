@@ -32,7 +32,7 @@ _AST_CONSTANT = getattr(ast, 'Constant', ())
 _AST_LEGACY = tuple(getattr(ast, k) for k in ('Num', 'Str', 'NameConstant') if hasattr(ast, k)) if sys.version_info < (3, 8) else ()
 _AST_INDEX = getattr(ast, 'Index', ()) if sys.version_info < (3, 9) else ()
 
-VERSION = '3.1.2'
+VERSION = '3.1.3'
 LANGUAGES = ['Python', 'Pseudocode', 'C', 'C++', 'C#', 'Java', 'JavaScript', 'TypeScript',
              'Go', 'Kotlin', 'Swift', 'PHP', 'R', 'MATLAB']
 # Every language can be generated AND parsed back, so code converts between any two.
@@ -51,6 +51,79 @@ DEFAULTS = {
     'Comment': {'text': 'Comment'}, 'Break': {}, 'Continue': {}
 }
 BRANCHES = {'If': ['true', 'false'], 'While': ['body'], 'Do': ['body'], 'For': ['body']}
+
+# Shared explanations keep the insertion picker, palette and edit dialogs in sync.
+SYMBOL_HELP = {
+    'Declare': {
+        'definition': 'Creates named variables or arrays and sets their type before they are used.',
+        'example': 'Declare total as Integer; its initial value is 0.',
+        'python_example': 'total = 0',
+        'note': 'Typed charts need declarations before Assign or Input. In Python, assignment creates the variable.'},
+    'Assign': {
+        'definition': 'Evaluates an expression and stores its result in a variable or array element, replacing the old value.',
+        'example': 'total = total + 1',
+        'note': 'The expression on the right is calculated before the target on the left is updated.'},
+    'Input': {
+        'definition': 'Pauses the program, asks the user for a value and stores it in the chosen variable.',
+        'example': 'Input n, where n was declared as Integer.',
+        'python_example': 'n = int(input("How many? "))',
+        'note': 'Typed charts convert to the declared type. Python input() returns text; use int() or float() for numbers.'},
+    'Output': {
+        'definition': 'Evaluates an expression and writes the result to the program console.',
+        'example': 'Output "Total: " & ToString(total)',
+        'python_example': 'print("Total:", total)',
+        'note': 'Newline starts a new output line. In Python, print(..., end="") keeps the next output on the same line.'},
+    'If': {
+        'definition': 'Tests a condition and follows exactly one branch: True when it passes, otherwise False.',
+        'example': 'x > 0: put the positive-number steps in True and the other steps in False.',
+        'note': 'After the selected branch finishes, both paths join and the program continues below the If.'},
+    'While': {
+        'definition': 'Checks its condition before each repetition and runs the body only while the condition is True.',
+        'example': 'i < 3: output i, then assign i = i + 1 inside the body.',
+        'note': 'The body may run zero times. Update the condition or use Break so the loop can finish.'},
+    'Do': {
+        'definition': 'Runs its body first, then repeats while its condition is True.',
+        'example': 'Run the body, then repeat while x < 3.',
+        'python_example': 'while True:\n    body()\n    if not condition: break',
+        'note': 'The body always runs at least once. Unlike While, the condition is checked after the body.'},
+    'For': {
+        'definition': 'Repeats its body for each loop value or item in an iterable.',
+        'example': 'i from 1 to 3 with step 1 visits 1, 2 and 3.',
+        'python_example': 'for item in values: print(item)  |  range(3) visits 0, 1 and 2.',
+        'note': 'Typed charts include the end value and use a positive step plus direction. Python range() excludes its stop; a dictionary loop visits keys.'},
+    'Call': {
+        'definition': 'Runs a defined function or procedure with the supplied arguments, then continues with the next shape.',
+        'example': 'display(total)',
+        'note': 'Define the function in the Functions menu or source. Use Assign when you need to keep its returned value.'},
+    'Return': {
+        'definition': 'Ends the current function immediately and sends its result back to the caller.',
+        'example': 'Return total',
+        'python_example': 'return total',
+        'note': 'Use inside a function. An empty return ends the function without a result.'},
+    'Comment': {
+        'definition': 'Adds a plain-language note explaining the nearby steps.',
+        'example': 'Calculate the running total.',
+        'note': 'A plain comment changes no variable values and does not choose a path or repeat any steps.'},
+    'Break': {
+        'definition': 'Exits the innermost enclosing loop immediately and continues after that loop.',
+        'example': 'Inside If x == 5, add Break to stop the loop.',
+        'note': 'Break can be used only inside For, While or Do. It does not exit an outer loop automatically.'},
+    'Continue': {
+        'definition': 'Skips the remaining steps in the current loop repetition and starts the next repetition or condition check.',
+        'example': 'Inside If x < 0, add Continue to skip processing that value.',
+        'note': 'Continue can be used only inside For, While or Do. It does not end the whole loop.'},
+    'Terminal': {
+        'definition': 'Marks where the current function starts or finishes.',
+        'example': 'Main starts the program; End finishes the current flowchart.',
+        'note': 'Start and End are supplied automatically. Insert new symbols on a connector between them.'}
+}
+
+
+def symbol_help_text(kind, python_mode=False):
+    info = SYMBOL_HELP.get(kind, {})
+    example = info.get('python_example') if python_mode else None
+    return ('{0}\n{1}\n\nExample: {2}\n\n{3}'.format(
+        kind, info.get('definition', ''), example or info.get('example', ''), info.get('note', '')))
 
 class FlowError(Exception):
     pass
@@ -10025,8 +10098,13 @@ def launch_gui(initial_path=None):
         def body(self, master):
             hint = ('Python expressions and collections. Indices start at zero.\nFor iterable: range(int(input())+1), a list, string, tuple or dictionary.' if self.python_mode else
                     'Expressions: =, <>, +, -, *, /, ^, &, And, Or, Not.\nArrays use zero-based indices: values[0].')
-            ttk.Label(master, text=hint, justify='left').grid(row=0, column=0, columnspan=2, sticky='w', pady=8)
-            row = 1
+            ttk.Label(master, text=symbol_help_text(self.original['kind'], self.python_mode),
+                      justify='left', wraplength=530, padding=(8, 6)).grid(
+                          row=0, column=0, columnspan=2, sticky='ew', pady=(4, 6))
+            ttk.Label(master, text=hint, justify='left', wraplength=530).grid(
+                row=1, column=0, columnspan=2, sticky='w', pady=(0, 8))
+            row = 2
+            control = None
             fields = list(DEFAULTS[self.original['kind']])
             if self.python_mode:
                 if self.original['kind'] == 'For': fields = ['variable', 'iterable']
@@ -10161,7 +10239,7 @@ def launch_gui(initial_path=None):
             self.code_status = tk.StringVar(value='')
             self.language = tk.StringVar(value='Python')
             self.function_var = tk.StringVar(value='Main')
-            self.status = tk.StringVar(value='Ready. Select a connector or block to insert a shape.')
+            self.status = tk.StringVar(value='Ready. Hover over a connector to open the symbol picker.')
             self.speed = tk.IntVar(value=250)
             self.speed_choice = tk.StringVar(value='0.25 seconds per instruction')
             self.palette_filter = tk.StringVar(value='')
@@ -10175,6 +10253,12 @@ def launch_gui(initial_path=None):
             self.drop_sites = []
             self.pending_insert = None
             self.insert_hit_targets = {}
+            self.connector_paths = {}
+            self.hover_connector = None
+            self.connector_hover_point = None
+            self.connector_hover_timer = None
+            self.connector_close_timer = None
+            self.shape_picker = None
             self.canvas_drag_iid = None
             self.canvas_drag_origin = None
             self.canvas_drag_moved = False
@@ -10244,6 +10328,7 @@ def launch_gui(initial_path=None):
             menu.add_cascade(label='View', menu=viewmenu)
             helpmenu = tk.Menu(menu, tearoff=False)
             helpmenu.add_command(label='Capabilities and limitations', command=self.help)
+            helpmenu.add_command(label='Symbol guide', command=self.symbol_guide)
             helpmenu.add_command(label='Expression reference', command=self.expression_help)
             helpmenu.add_command(label='About', command=lambda: messagebox.showinfo('About', 'Flowchart Studio ' + VERSION + '\nIndependent standard-library Python 3.3+ application.\nNot affiliated with Flowgorithm.', parent=self.root))
             menu.add_cascade(label='Help', menu=helpmenu)
@@ -10289,7 +10374,7 @@ def launch_gui(initial_path=None):
             self.function_box.pack(side='left')
             self.function_box.bind('<<ComboboxSelected>>', self.switch_function)
             ttk.Button(document_bar, text='+', width=3, command=self.add_function, style='Tool.TButton').pack(side='left', padx=3)
-            ttk.Label(document_bar, text='Click an arrow to insert  |  Double-click a symbol to edit', foreground='#65748a').pack(side='left', padx=18)
+            ttk.Label(document_bar, text='Hover arrows to add  |  Double-click symbols to edit', foreground='#65748a').pack(side='left', padx=18)
             self.zoom_label = tk.StringVar(value='100%')
             ttk.Button(document_bar, text='-', width=3, command=lambda: self.set_zoom(1 / 1.15), style='Tool.TButton').pack(side='right')
             ttk.Button(document_bar, textvariable=self.zoom_label, width=6, command=self.reset_zoom, style='Tool.TButton').pack(side='right')
@@ -10338,8 +10423,8 @@ def launch_gui(initial_path=None):
             area = ttk.Frame(center)
             area.pack(fill='both', expand=True)
             self.canvas = tk.Canvas(area, bg='white', highlightthickness=0, cursor='arrow')
-            ys = ttk.Scrollbar(area, orient='vertical', command=self.canvas.yview)
-            xs = ttk.Scrollbar(area, orient='horizontal', command=self.canvas.xview)
+            ys = ttk.Scrollbar(area, orient='vertical', command=lambda *args: self.scroll_canvas('y', *args))
+            xs = ttk.Scrollbar(area, orient='horizontal', command=lambda *args: self.scroll_canvas('x', *args))
             self.canvas.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
             ys.pack(side='right', fill='y')
             xs.pack(side='bottom', fill='x')
@@ -10351,9 +10436,11 @@ def launch_gui(initial_path=None):
             self.canvas.bind('<Double-1>', self.canvas_edit)
             self.canvas.bind('<Button-3>', self.canvas_menu)
             self.canvas.bind('<MouseWheel>', self.mousewheel)
-            self.canvas.bind('<Button-4>', lambda e: self.canvas.yview_scroll(-3, 'units'))
-            self.canvas.bind('<Button-5>', lambda e: self.canvas.yview_scroll(3, 'units'))
+            self.canvas.bind('<Button-4>', lambda e: self.scroll_canvas('y', 'scroll', -3, 'units'))
+            self.canvas.bind('<Button-5>', lambda e: self.scroll_canvas('y', 'scroll', 3, 'units'))
             self.canvas.bind('<Configure>', self.resize_canvas)
+            self.canvas.bind('<Motion>', self.connector_motion, add='+')
+            self.canvas.bind('<Leave>', self.connector_leave, add='+')
             self.root.bind_all('<ButtonRelease-1>', self.global_drag_release, add='+')
             tools_header = ttk.Frame(right)
             tools_header.pack(fill='x')
@@ -10458,20 +10545,38 @@ def launch_gui(initial_path=None):
             state = {'timer': None, 'window': None}
             def hide(event=None):
                 if state['timer'] is not None:
-                    self.root.after_cancel(state['timer']); state['timer'] = None
+                    try:
+                        self.root.after_cancel(state['timer'])
+                    except tk.TclError:
+                        pass
+                    state['timer'] = None
                 if state['window'] is not None:
-                    state['window'].destroy(); state['window'] = None
+                    window, state['window'] = state['window'], None
+                    try:
+                        window.destroy()
+                    except tk.TclError:
+                        pass
             def show():
                 state['timer'] = None
+                if not widget.winfo_exists():
+                    return
                 win = state['window'] = tk.Toplevel(self.root)
                 win.wm_overrideredirect(True)
-                win.geometry('+%d+%d' % (widget.winfo_rootx(), widget.winfo_rooty()+widget.winfo_height()+5))
-                tk.Label(win, text=text, bg='#fffde9', fg='#253247', padx=8, pady=4, relief='solid', borderwidth=1).pack()
+                tk.Label(win, text=text, bg='#fffde9', fg='#253247', padx=8, pady=4,
+                         wraplength=480, justify='left', relief='solid', borderwidth=1).pack()
+                win.update_idletasks()
+                width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+                x = min(widget.winfo_rootx(), max(10, self.root.winfo_screenwidth()-width-10))
+                y = widget.winfo_rooty()+widget.winfo_height()+5
+                if y+height > self.root.winfo_screenheight()-10:
+                    y = widget.winfo_rooty()-height-5
+                win.geometry('+%d+%d' % (max(10, x), max(10, y)))
             def later(event):
                 hide(); state['timer'] = self.root.after(550, show)
-            widget.bind('<Enter>', later)
-            widget.bind('<Leave>', hide)
+            widget.bind('<Enter>', later, add='+')
+            widget.bind('<Leave>', hide, add='+')
             widget.bind('<ButtonPress>', hide, add='+')
+            widget.bind('<Destroy>', lambda e: hide() if e.widget is widget else None, add='+')
 
         def show_generated_code(self):
             self.show_tools(0)
@@ -10580,6 +10685,7 @@ def launch_gui(initial_path=None):
                 tile.bind('<ButtonRelease-1>',lambda e,k=kind:self.palette_drag_release(e,k))
                 tile.bind('<Enter>',lambda e,w=tile:w.configure(highlightbackground='#3b82f6'))
                 tile.bind('<Leave>',lambda e,w=tile:w.configure(highlightbackground='#cbd5e1'))
+                self.tooltip(tile, symbol_help_text(kind, self.doc.get('python', False)))
             for col in range(2):
                 self.palette.grid_columnconfigure(col,weight=1)
 
@@ -10723,7 +10829,11 @@ def launch_gui(initial_path=None):
             return (s[1], s[2] + 1) if s[0] == 'node' else (s[1], len(s[1]))
 
         def add_shape(self, kind):
+            insertion_doc = self.doc if self.pending_insert is not None else None
             if not self.sync_source():
+                return
+            if insertion_doc is not None and self.doc is not insertion_doc:
+                self.status.set('The diagram was updated from source. Hover over a connector to choose the insertion point again.')
                 return
             self.pause()
             insertion = self.pending_insert
@@ -11150,7 +11260,7 @@ def launch_gui(initial_path=None):
             items=[]
             for obj in cv.find_all():
                 tags=cv.gettags(obj)
-                if 'drop_hint' in tags or any(t.startswith('insert_at_') for t in tags):
+                if 'drop_hint' in tags or 'connector_halo' in tags or any(t.startswith('insert_at_') for t in tags):
                     continue
                 typ=cv.type(obj)
                 if typ not in ('line','rectangle','oval','polygon','text'):
@@ -11172,6 +11282,9 @@ def launch_gui(initial_path=None):
                     one['fill']=rgb(cv.itemcget(obj,'fill')) if typ!='line' else None
                     one['outline']=rgb(cv.itemcget(obj,'outline')) if typ!='line' else rgb(cv.itemcget(obj,'fill'))
                     one['width']=float(cv.itemcget(obj,'width') or 1)/self.zoom
+                    if 'flow_connector' in tags:
+                        one['outline']=rgb('#65758a')
+                        one['width']=1.5/self.zoom
                     if typ=='line':
                         one['arrow']=cv.itemcget(obj,'arrow')
                 items.append(one)
@@ -11213,7 +11326,9 @@ def launch_gui(initial_path=None):
             return self.tree.selection()[0] if self.tree.selection() else None
 
         def draw(self):
+            self.close_shape_picker()
             self.canvas.delete('all')
+            self.connector_paths = {}
             self.canvas_hits = {}
             self.insert_hit_targets = {}
             self.drop_sites = []
@@ -11231,31 +11346,34 @@ def launch_gui(initial_path=None):
                     elif n['kind'] in ('While', 'Do', 'For'):
                         w = max(w, width(n['body']) + 90)
                 return w
-            def line(coords, arrow=True, dash=None):
+            def line(coords, arrow=True, dash=None, target=None):
                 opts = {'fill': '#65758a', 'width': 1.5, 'arrow': 'last' if arrow else 'none'}
                 if dash:
                     opts['dash'] = dash
-                self.canvas.create_line(*[v*z for v in coords], **opts)
+                scaled = [v*z for v in coords]
+                if target is not None:
+                    block, index = target
+                    key = (id(block), index)
+                    tag = connector_keys.get(key)
+                    if tag is None:
+                        tag = 'connector_' + str(len(self.connector_paths)+1)
+                        connector_keys[key] = tag
+                        self.insert_hit_targets[tag] = (block, index)
+                        self.connector_paths[tag] = {'target': (block, index), 'parts': [], 'coords': scaled, 'segments': []}
+                    opts['tags'] = ('flow_connector', tag)
+                item = self.canvas.create_line(*scaled, **opts)
+                if target is not None:
+                    record = self.connector_paths[tag]
+                    record['parts'].append(item)
+                    record['segments'].append(scaled)
+                    self.canvas.tag_bind(tag, '<Button-1>', lambda e, t=tag: self.connector_clicked(e, t))
+                    self.canvas.tag_bind(tag, '<Button-3>', lambda e, t=tag: self.connector_menu(e, t))
+                    self.canvas.tag_bind(tag, '<Double-1>', lambda e, t=tag: self.connector_menu(e, t))
+                return item
+            connector_keys = {}
             def insert_target(x, y, block, index):
-                # A small connector hotspot mirrors Flowgorithm's orange-on-hover
-                # insertion arrows. It is an actual canvas item, not a palette button.
-                tag = 'insert_at_' + str(len(self.insert_hit_targets) + 1)
-                self.insert_hit_targets[tag] = (block, index)
-                cx, cy = x*z, y*z
-                self.drop_sites.append((cx, cy, block, index))
-                item = self.canvas.create_line(cx, cy-5*z, cx, cy+5*z,
-                                               fill='#64748b', width=max(3, 4*z),
-                                               tags=(tag,))
-                self.canvas.tag_bind(tag, '<Enter>',
-                    lambda e, t=tag: self.canvas.itemconfigure(t, fill='#f97316', width=max(5, 7*self.zoom)))
-                self.canvas.tag_bind(tag, '<Leave>',
-                    lambda e, t=tag: self.canvas.itemconfigure(t, fill='#64748b', width=max(3, 4*self.zoom)))
-                self.canvas.tag_bind(tag, '<Button-1>',
-                    lambda e, t=tag: self.connector_clicked(e, t))
-                self.canvas.tag_bind(tag, '<Button-3>',
-                    lambda e, t=tag: self.connector_menu(e, t))
-                self.canvas.tag_bind(tag, '<Double-1>',
-                    lambda e, t=tag: self.connector_menu(e, t))
+                # Drop sites share the full edge mapping; no tiny overlay line.
+                self.drop_sites.append((x*z, y*z, block, index))
             def text(x, y, value, **kwargs):
                 self.canvas.create_text(x*z, y*z, text=value, font=(self.ui_font, max(8, int(11*z))), **kwargs)
             def shape(n, x, y, terminal=None):
@@ -11355,11 +11473,12 @@ def launch_gui(initial_path=None):
                 if not block:
                     tag = 'hit_' + block_iid
                     self.canvas_hits[tag] = block_iid
-                    line([x, y, x, y+35])
+                    line([x, y, x, y+35], target=(block, 0))
                     insert_target(x, y+18, block, 0)
+                    line([x, y+35, x, y+58], False, target=(block, 0))
                     self.canvas.create_oval((x-10)*z, (y+38)*z, (x+10)*z, (y+58)*z, fill='white', outline='#94a3b8', tags=(tag,))
                     text(x, y+48, '+', tags=(tag,))
-                    line([x, y+58, x, y+80])
+                    line([x, y+58, x, y+80], target=(block, 0))
                     return y+80
                 for sequence_index, n in enumerate(block):
                     if n['kind'] == 'Do':
@@ -11367,20 +11486,20 @@ def launch_gui(initial_path=None):
                         ni = self.node_iids[id(n)]
                         child = self.tree.get_children(ni)[0]
                         entry_y = y + 25
-                        line([x, y, x, entry_y])
+                        line([x, y, x, entry_y], target=(block, sequence_index))
                         text(x+55, entry_y-5, 'Do body', fill='#7c3aed')
                         by = block_draw(n['body'], x, entry_y, child)
-                        line([x, by, x, by+25])
+                        line([x, by, x, by+25], target=(n['body'], len(n['body'])))
                         top = by+25
                         bottom = shape(n, x, top)
                         loopx = x-width(n['body'])/2-35
-                        line([x-88, top+31, loopx, top+31, loopx, entry_y, x, entry_y])
+                        line([x-88, top+31, loopx, top+31, loopx, entry_y, x, entry_y], target=(n['body'], 0))
                         text(loopx+22, top+16, 'True', fill='#15803d')
                         text(x+30, bottom+14, 'False', fill='#b91c1c')
                         y = bottom+25
-                        line([x, bottom, x, y])
+                        line([x, bottom, x, y], target=(block, sequence_index+1))
                         continue
-                    line([x, y, x, y+25])
+                    line([x, y, x, y+25], target=(block, sequence_index))
                     if n is self.current_node and self.engine is not None:
                         self.canvas.create_line(x*z,y*z,x*z,(y+25)*z,fill='#fb923c',width=max(3,5*z),arrow='last')
                     insert_target(x, y+12, block, sequence_index)
@@ -11392,23 +11511,24 @@ def launch_gui(initial_path=None):
                     if n['kind'] == 'If':
                         wl, wr = width(n['true']), width(n['false'])
                         lx, rx = x-(wr/2+25), x+(wl/2+25)
-                        line([x-88, top+31, lx, top+31, lx, y+20])
-                        line([x+88, top+31, rx, top+31, rx, y+20])
+                        line([x-88, top+31, lx, top+31, lx, y+20], target=(n['true'], 0))
+                        line([x+88, top+31, rx, top+31, rx, y+20], target=(n['false'], 0))
                         text(lx, y+8, 'True', fill='#15803d')
                         text(rx, y+8, 'False', fill='#b91c1c')
                         ly = block_draw(n['true'], lx, y+20, children[0])
                         ry = block_draw(n['false'], rx, y+20, children[1])
                         y = max(ly, ry)+25
-                        line([lx, ly, lx, y, x, y], False)
-                        line([rx, ry, rx, y, x, y], False)
+                        line([lx, ly, lx, y, x, y], False, target=(n['true'], len(n['true'])))
+                        line([rx, ry, rx, y, x, y], False, target=(n['false'], len(n['false'])))
                     elif n['kind'] in ('While', 'For'):
                         text(x+28, y+12, 'True / body', fill='#15803d')
                         start = y
+                        line([x, y, x, y+25], target=(n['body'], 0))
                         by = block_draw(n['body'], x, y+25, children[0])
                         bw = width(n['body'])/2+25
-                        line([x, by, x-bw, by, x-bw, top+31, x-88, top+31])
+                        line([x, by, x, by+18, x-bw, by+18, x-bw, top+31, x-88, top+31], target=(n['body'], len(n['body'])))
                         outx = x+bw+20
-                        line([x+88, top+31, outx, top+31, outx, by+35, x, by+35], False)
+                        line([x+88, top+31, outx, top+31, outx, by+35, x, by+35], False, target=(block, sequence_index+1))
                         text(outx-20, top+18, 'False', fill='#b91c1c')
                         y = by+35
                 # Allow insertion after the last node as well as before nodes.
@@ -11419,13 +11539,14 @@ def launch_gui(initial_path=None):
             y = shape(None, x, 25, self.function_var.get())
             rootid = self.tree.get_children()[0]
             y = block_draw(body, x, y, rootid)
-            line([x, y, x, y+30])
+            line([x, y, x, y+30], target=(body, len(body)))
             shape(None, x, y+30, 'End')
             bounds = self.canvas.bbox('all')
             if bounds:
                 self.canvas.configure(scrollregion=(min(0,bounds[0]-30), 0, max(self.canvas.winfo_width(),bounds[2]+30), max(self.canvas.winfo_height(),bounds[3]+30)))
 
         def palette_drag_start(self, event, kind):
+            self.close_shape_picker()
             self.palette_drag_kind = kind
             self.palette_drag_origin = (event.x_root, event.y_root)
             self.palette_drag_moved = False
@@ -11460,6 +11581,10 @@ def launch_gui(initial_path=None):
                 return None
             cx = self.canvas.canvasx(root_x - self.canvas.winfo_rootx())
             cy = self.canvas.canvasy(root_y - self.canvas.winfo_rooty())
+            tag = self._connector_at(cx, cy)
+            if tag is not None:
+                block, index = self.connector_paths[tag]['target']
+                return (cx, cy, block, index)
             if not self.drop_sites:
                 return None
             return min(self.drop_sites,
@@ -11505,6 +11630,9 @@ def launch_gui(initial_path=None):
             # Fallback for platforms that route the release outside the tile.
             if self.palette_drag_kind is not None:
                 self.palette_drag_release(event, self.palette_drag_kind)
+            self.canvas_drag_iid = None
+            self.canvas_drag_origin = None
+            self.canvas_drag_moved = False
 
         def palette_drag_release(self, event, kind):
             if self.palette_drag_kind is None:
@@ -11575,9 +11703,156 @@ def launch_gui(initial_path=None):
                         self.status.set('Blocks swapped by drag-and-drop.')
                     else:
                         self.status.set('Blocks can be reordered within the same branch.')
-                self.canvas_drag_iid = None
-                self.canvas_drag_origin = None
-                self.canvas_drag_moved = False
+            self.canvas_drag_iid = None
+            self.canvas_drag_origin = None
+            self.canvas_drag_moved = False
+
+        def _cancel_connector_timer(self, attribute):
+            timer = getattr(self, attribute, None)
+            if timer is not None:
+                try:
+                    self.root.after_cancel(timer)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
+
+        def _clear_connector_glow(self):
+            try:
+                if not self.canvas.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            self.canvas.delete('connector_halo')
+            for record in self.connector_paths.values():
+                for part in record['parts']:
+                    if self.canvas.type(part):
+                        self.canvas.itemconfigure(part, fill='#65758a', width=1.5)
+
+        def close_shape_picker(self, clear_hover=True, keep_target=False):
+            self._cancel_connector_timer('connector_hover_timer')
+            self._cancel_connector_timer('connector_close_timer')
+            window = self.shape_picker
+            self.shape_picker = None
+            if window is not None:
+                try:
+                    if window.winfo_exists():
+                        window.destroy()
+                except tk.TclError:
+                    pass
+            if not keep_target:
+                self.pending_insert = None
+            if clear_hover:
+                self._clear_connector_glow()
+                self.hover_connector = None
+                self.connector_hover_point = None
+
+        def _connector_distance(self, coords, x, y):
+            best = float('inf')
+            for offset in range(0, len(coords)-2, 2):
+                ax, ay, bx, by = coords[offset:offset+4]
+                dx, dy = bx-ax, by-ay
+                fraction = max(0.0, min(1.0, ((x-ax)*dx+(y-ay)*dy)/(dx*dx+dy*dy))) if dx or dy else 0.0
+                best = min(best, math.hypot(x-(ax+fraction*dx), y-(ay+fraction*dy)))
+            return best
+
+        def _connector_at(self, x, y):
+            best, distance = None, 8.0
+            candidates = list(self.connector_paths)
+            if self.hover_connector in candidates:
+                candidates.remove(self.hover_connector)
+                candidates.insert(0, self.hover_connector)
+            for tag in candidates:
+                record = self.connector_paths[tag]
+                found = min(self._connector_distance(path, x, y) for path in record['segments'])
+                if found < distance:
+                    best, distance = tag, found
+            return best
+
+        def _glow_connector(self, tag):
+            self._clear_connector_glow()
+            record = self.connector_paths.get(tag)
+            if record is None:
+                return
+            for coords in record['segments']:
+                for width, color in ((max(9, 12*self.zoom), '#ffe2ba'), (max(5, 7*self.zoom), '#ffc67d')):
+                    item = self.canvas.create_line(*coords, fill=color, width=width,
+                                                   capstyle='round', joinstyle='round',
+                                                   tags=('connector_halo',))
+                    self.canvas.tag_lower(item)
+            for part in record['parts']:
+                self.canvas.itemconfigure(part, fill='#ef7d00', width=max(2.5, 3*self.zoom))
+
+        def connector_motion(self, event):
+            if self.running or self.palette_drag_kind or self.canvas_drag_iid:
+                return
+            # Actual symbols take precedence over the generous wire hit radius.
+            hit = self._canvas_hit_iid(event)
+            if hit and self.mapping.get(hit, (None,))[0] == 'node':
+                self.connector_leave(event)
+                return
+            tag = self._connector_at(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+            if tag is None:
+                self.connector_leave(event)
+                return
+            self._cancel_connector_timer('connector_close_timer')
+            self.connector_hover_point = (event.x_root, event.y_root)
+            if tag == self.hover_connector:
+                if self.shape_picker is None and self.connector_hover_timer is None:
+                    self.connector_hover_timer = self.root.after(250, lambda t=tag: self._open_hover_picker(t))
+                return
+            self.close_shape_picker()
+            self.hover_connector = tag
+            self.connector_hover_point = (event.x_root, event.y_root)
+            self._glow_connector(tag)
+            self.connector_hover_timer = self.root.after(250, lambda t=tag: self._open_hover_picker(t))
+
+        def _open_hover_picker(self, tag):
+            self.connector_hover_timer = None
+            if tag != self.hover_connector or tag not in self.connector_paths or self.running:
+                return
+            if self.palette_drag_kind or self.canvas_drag_iid:
+                return
+            self.pending_insert = self.connector_paths[tag]['target']
+            x, y = self.connector_hover_point
+            self.show_shape_picker(x+14, y+14)
+
+        def connector_leave(self, event=None):
+            self._cancel_connector_timer('connector_hover_timer')
+            if self.hover_connector is not None or self.shape_picker is not None:
+                self._cancel_connector_timer('connector_close_timer')
+                self.connector_close_timer = self.root.after(180, self._close_picker_if_outside)
+
+        def picker_enter(self, event=None):
+            self._cancel_connector_timer('connector_close_timer')
+
+        def picker_leave(self, event=None):
+            self.connector_leave(event)
+
+        def _close_picker_if_outside(self):
+            self.connector_close_timer = None
+            try:
+                rx, ry = self.root.winfo_pointerxy()
+                window = self.shape_picker
+                if window is not None and window.winfo_exists():
+                    wx, wy = window.winfo_rootx(), window.winfo_rooty()
+                    if wx <= rx < wx+window.winfo_width() and wy <= ry < wy+window.winfo_height():
+                        return
+                    # A short corridor lets the pointer reach the popup without
+                    # requiring a perfectly straight or instant mouse movement.
+                    if self.connector_hover_point is not None:
+                        ax, ay = self.connector_hover_point
+                        nearest_x = max(wx, min(ax, wx+window.winfo_width()))
+                        nearest_y = max(wy, min(ay, wy+window.winfo_height()))
+                        if min(ax, nearest_x)-7 <= rx <= max(ax, nearest_x)+7 and min(ay, nearest_y)-7 <= ry <= max(ay, nearest_y)+7:
+                            return
+                if self._over_diagram(rx, ry) and self.hover_connector is not None:
+                    x = self.canvas.canvasx(rx-self.canvas.winfo_rootx())
+                    y = self.canvas.canvasy(ry-self.canvas.winfo_rooty())
+                    if self._connector_at(x, y) == self.hover_connector:
+                        return
+            except tk.TclError:
+                pass
+            self.close_shape_picker()
 
         def connector_clicked(self, event, tag):
             target = self.insert_hit_targets.get(tag)
@@ -11599,11 +11874,42 @@ def launch_gui(initial_path=None):
 
         def show_shape_picker(self, x_root, y_root):
             """Flowgorithm-style visual Add Shape palette, anchored at a connector."""
+            self.close_shape_picker(clear_hover=False, keep_target=True)
+            # Finish pending pane/canvas geometry before publishing a popup.
+            # A Configure redraw closes old pickers, including during idles.
+            insertion, document = self.pending_insert, self.doc
+            hovered, hover_point = self.hover_connector, self.connector_hover_point
+            self.root.update_idletasks()
+            if self.doc is not document:
+                return None
+            self.pending_insert = insertion
+            if hovered is not None and insertion is not None:
+                for tag, record in self.connector_paths.items():
+                    block, index = record['target']
+                    if block is insertion[0] and index == insertion[1]:
+                        self.hover_connector = tag
+                        self.connector_hover_point = hover_point
+                        self._glow_connector(tag)
+                        break
             win = tk.Toplevel(self.root)
+            self.shape_picker = win
             win.title('Add Shape')
             win.transient(self.root)
             win.resizable(False, False)
             win.configure(bg='#f8fafc')
+            win.protocol('WM_DELETE_WINDOW', self.close_shape_picker)
+            win.bind('<Escape>', lambda e: self.close_shape_picker())
+            win.bind('<Enter>', self.picker_enter, add='+')
+            win.bind('<Leave>', self.picker_leave, add='+')
+            def destroyed(event):
+                if event.widget is win and self.shape_picker is win:
+                    self.shape_picker = None
+                    self.pending_insert = None
+                    self._cancel_connector_timer('connector_close_timer')
+                    self._cancel_connector_timer('connector_hover_timer')
+                    self._clear_connector_glow()
+                    self.hover_connector = None
+            win.bind('<Destroy>', destroyed, add='+')
             header = tk.Frame(win, bg='#f8fafc', padx=12, pady=9)
             header.pack(fill='x')
             tk.Label(header, text='Add a shape', bg='#f8fafc', fg='#0f172a',
@@ -11611,7 +11917,25 @@ def launch_gui(initial_path=None):
             tk.Label(header, text='Choose a symbol to insert here', bg='#f8fafc',
                      fg='#64748b').pack(side='left', padx=12)
             grid = tk.Frame(win, bg='#e2e8f0', padx=1, pady=1)
-            grid.pack(padx=10, pady=(0, 10))
+            grid.pack(padx=10, pady=(0, 8))
+            help_panel = tk.Frame(win, bg='#edf4fc', padx=10, pady=8,
+                                  width=540, height=184)
+            help_panel.pack(fill='x', padx=10, pady=(0, 10))
+            help_panel.pack_propagate(False)
+            win.symbol_help_kind = tk.StringVar(master=win)
+            win.symbol_help_text = tk.StringVar(master=win)
+            win.symbol_cards = {}
+            tk.Label(help_panel, textvariable=win.symbol_help_kind, bg='#edf4fc',
+                     fg='#183452', font=(self.ui_font, 10, 'bold'),
+                     anchor='w').pack(fill='x')
+            tk.Label(help_panel, textvariable=win.symbol_help_text, bg='#edf4fc',
+                     fg='#334155', font=(self.ui_font, 9), wraplength=520,
+                     justify='left', anchor='nw').pack(fill='both', expand=True, pady=(4, 0))
+            def preview(kind):
+                win.symbol_help_kind.set(kind)
+                body = symbol_help_text(kind, self.doc.get('python', False)).split('\n', 1)[1]
+                win.symbol_help_text.set(body)
+            preview('Assign')
             styles = {
                 'Declare': ('#e0e7ff', 'rectangle'), 'Assign': ('#dbeafe', 'rectangle'),
                 'Input': ('#dcfce7', 'io'), 'Output': ('#dcfce7', 'io'),
@@ -11624,10 +11948,12 @@ def launch_gui(initial_path=None):
             choices = [k for k in KINDS if k not in ('Terminal',)]
             for idx, kind in enumerate(choices):
                 bg, shape_kind = styles.get(kind, ('#e2e8f0', 'rectangle'))
-                card = tk.Frame(grid, bg='#ffffff', width=132, height=88,
-                                highlightbackground='#cbd5e1', highlightthickness=1)
+                card = tk.Frame(grid, bg='#ffffff', width=132, height=80,
+                                highlightbackground='#cbd5e1', highlightthickness=1,
+                                takefocus=True)
                 card.grid(row=idx // 4, column=idx % 4, padx=1, pady=1, sticky='nsew')
                 card.grid_propagate(False)
+                win.symbol_cards[kind] = card
                 icon = tk.Canvas(card, width=116, height=53, bg='#ffffff',
                                 highlightthickness=0, cursor='hand2')
                 icon.pack(pady=(4, 0))
@@ -11653,21 +11979,26 @@ def launch_gui(initial_path=None):
                 caption = tk.Label(card, text=kind, bg='#ffffff', fg='#0f172a',
                          font=(self.ui_font, 9, 'bold'), cursor='hand2')
                 caption.pack()
-                def choose(k=kind, window=win):
-                    window.destroy()
+                def choose(k=kind):
+                    self.close_shape_picker(keep_target=True)
                     self.add_shape(k)
                 for widget in (card, icon, caption):
                     widget.bind('<Button-1>', lambda e, fn=choose: fn())
-                    widget.bind('<Enter>', lambda e, w=card: w.configure(bg='#eff6ff'))
+                    widget.bind('<Enter>', lambda e, w=card, k=kind: (w.configure(bg='#eff6ff'), preview(k)))
                     widget.bind('<Leave>', lambda e, w=card: w.configure(bg='#ffffff'))
+                    widget.bind('<FocusIn>', lambda e, k=kind: preview(k))
                 # A button-like hover/click target across the entire card.
                 card.bind('<Double-Button-1>', lambda e, fn=choose: fn())
+                card.bind('<Return>', lambda e, fn=choose: fn())
+                card.bind('<space>', lambda e, fn=choose: fn())
             win.update_idletasks()
+            if not win.winfo_exists():
+                return None
             sw, sh = win.winfo_reqwidth(), win.winfo_reqheight()
             x = min(max(10, x_root), max(10, self.root.winfo_screenwidth() - sw - 10))
             y = min(max(10, y_root), max(10, self.root.winfo_screenheight() - sh - 10))
             win.geometry('+%d+%d' % (x, y))
-            win.focus_force()
+            return win
 
         def change_speed(self, event=None):
             values = {
@@ -11704,11 +12035,15 @@ def launch_gui(initial_path=None):
                 menu.add_command(label=text, command=cmd)
             menu.tk_popup(event.x_root, event.y_root)
 
+        def scroll_canvas(self, axis, *args):
+            self.close_shape_picker()
+            getattr(self.canvas, axis + 'view')(*args)
+
         def mousewheel(self, event):
             if event.state & 0x0004:
                 self.set_zoom(1.1 if event.delta > 0 else 1 / 1.1)
             else:
-                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+                self.scroll_canvas('y', 'scroll', -1 if event.delta > 0 else 1, 'units')
 
         def set_zoom(self, factor):
             self.zoom = max(0.4, min(2.2, self.zoom * factor))
@@ -11875,6 +12210,11 @@ def launch_gui(initial_path=None):
         def help(self):
             self.show_text('Capabilities and honest limitations', CAPABILITIES)
 
+        def symbol_guide(self):
+            self.show_text('Symbol guide', '\n\n'.join(
+                symbol_help_text(kind, self.doc.get('python', False))
+                for kind in ['Terminal'] + KINDS))
+
         def expression_help(self):
             self.show_text('Expressions and usage', '''Python source uses normal Python syntax and dynamic values: no declarations needed.
 Use ** for powers, ^ for bitwise XOR, == for equality.
@@ -11908,6 +12248,9 @@ For loops include the end value. Step must be positive;
 choose direction dec to count down. Declare the loop variable first.
 Do loops always run the body once, then repeat while condition is true.
 
+Hover any part of a connector to highlight its complete path and open
+the symbol picker. Move over a symbol to read its definition and example.
+Help > Symbol guide lists every symbol, including Main and End.
 Select a block in the outline to append inside it. Select a shape to
 insert after it. Click a canvas shape to select; double-click to edit.
 Use cut/paste to move a shape between branches. Delete removes its
@@ -11935,6 +12278,7 @@ PDFs can use very large pages or multiple pages when the chart is enormous.
 
         def close(self):
             if self.check_discard():
+                self.close_shape_picker()
                 self.pause()
                 self.root.destroy()
 
