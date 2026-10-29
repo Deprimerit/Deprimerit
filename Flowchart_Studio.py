@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Flowchart Studio - single-file educational flowchart editor with drag-and-drop.
-Works on Python 3.3 and newer; standard library only. Run this file to open the
+Works on Python 3.2 and newer; standard library only. Run this file to open the
 Tk desktop UI (Tk must be part of your Python installation).
 
 The source panel is two-way: edit Python or Pseudocode and the flowchart
@@ -24,6 +24,7 @@ import os
 import random
 import re
 import sys
+import time
 import tokenize
 import xml.etree.ElementTree as ET
 
@@ -31,8 +32,9 @@ import xml.etree.ElementTree as ET
 _AST_CONSTANT = getattr(ast, 'Constant', ())
 _AST_LEGACY = tuple(getattr(ast, k) for k in ('Num', 'Str', 'NameConstant') if hasattr(ast, k)) if sys.version_info < (3, 8) else ()
 _AST_INDEX = getattr(ast, 'Index', ()) if sys.version_info < (3, 9) else ()
+_CLOCK = getattr(time, 'monotonic', time.time)
 
-VERSION = '3.1.4'
+VERSION = '3.1.5'
 LANGUAGES = ['Python', 'Pseudocode', 'C', 'C++', 'C#', 'Java', 'JavaScript', 'TypeScript',
              'Go', 'Kotlin', 'Swift', 'PHP', 'R', 'MATLAB']
 # Every language can be generated AND parsed back, so code converts between any two.
@@ -129,6 +131,11 @@ class FlowError(Exception):
     pass
 
 class Unsupported(FlowError):
+    pass
+
+
+class ExecutionStopped(Exception):
+    """Normal cancellation of a running editor interpreter."""
     pass
 
 def node(kind, **kwargs):
@@ -369,7 +376,7 @@ def save_document(doc, path):
         write_block(ET.SubElement(e, 'body'), f['body'])
     ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
 
-# Safe interpreter with resumable execution and a bounded operation count.
+# Interpreter with resumable execution and optional operation budgets.
 # Python programs use a separate dynamic model. The portable four-type model
 # remains available for hand-built charts and the other language front-ends.
 # No source text is evaluated/compiled/executed by the chart interpreter.
@@ -403,7 +410,7 @@ _AST_UNPARSE = getattr(ast, 'unparse', None)
 
 
 def ast_source(node):
-    """Return equivalent source on Python 3.3+ without requiring ast.unparse."""
+    """Return equivalent source on Python 3.2+ without requiring ast.unparse."""
     if _AST_UNPARSE is not None:
         return _AST_UNPARSE(node)
     return _ast_source_compat(node)
@@ -921,11 +928,29 @@ class _PythonModule(object):
         self.module = math if name == 'math' else random
 
 
+def _execution_limit(value):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise FlowError('Execution limit must be a nonnegative integer or None.')
+    return value
+
+
+def _execution_tick(engine):
+    engine.count += 1
+    if engine.limit is not None and engine.count > engine.limit:
+        raise FlowError('Execution limit of {0} operations reached.'.format(engine.limit))
+    # The desktop uses this hook to process Pause/Stop even while evaluating
+    # a single expression, comprehension or function call. Headless callers
+    # need no event loop and can supply an explicit total budget if desired.
+    if engine.checkpoint is not None and engine.count % 256 == 0:
+        engine.checkpoint()
+
+
 class PythonInterpreter(object):
-    """Bounded interpreter of validated AST nodes, never Python eval/exec."""
-    def __init__(self, doc, input_callback=None, output_callback=None, limit=100000):
+    """Interpreter of validated AST nodes with an optional operation budget."""
+    def __init__(self, doc, input_callback=None, output_callback=None, limit=None, checkpoint=None):
         validate_python_document(doc)
-        self.doc, self.limit, self.count = doc, limit, 0
+        self.doc, self.limit, self.count = doc, _execution_limit(limit), 0
+        self.checkpoint = checkpoint
         self.input = input_callback or (lambda name: input())
         self.output = output_callback or (lambda value, nl: print(value, end='\n' if nl else ''))
         self.env, self.types, self.frames = {}, {}, []
@@ -945,9 +970,7 @@ class PythonInterpreter(object):
                          'print':self.print_value, 'input':self.read_input}
 
     def tick(self):
-        self.count += 1
-        if self.count > self.limit:
-            raise FlowError('Execution limit reached; possible infinite loop/recursion.')
+        _execution_tick(self)
 
     def read_input(self, prompt=''):
         self.output(str(prompt), False)
@@ -1373,18 +1396,19 @@ class PythonInterpreter(object):
 
 
 class Interpreter(object):
-    def __new__(cls, doc, input_callback=None, output_callback=None, limit=100000):
+    def __new__(cls, doc, input_callback=None, output_callback=None, limit=None, checkpoint=None):
         if doc.get("python"):
-            return PythonInterpreter(doc, input_callback, output_callback, limit)
+            return PythonInterpreter(doc, input_callback, output_callback, limit, checkpoint)
         return object.__new__(cls)
 
-    def __init__(self, doc, input_callback=None, output_callback=None, limit=100000):
+    def __init__(self, doc, input_callback=None, output_callback=None, limit=None, checkpoint=None):
         validate(doc)
         self.doc = doc
         self.functions = dict((f['name'], f) for f in doc['functions'])
         self.input = input_callback or (lambda name: input(name + ': '))
         self.output = output_callback or (lambda value, nl: print(value, end='\n' if nl else ''))
-        self.limit = limit
+        self.limit = _execution_limit(limit)
+        self.checkpoint = checkpoint
         self.count = 0
         self.env = {}
         self.types = {}
@@ -1408,9 +1432,7 @@ class Interpreter(object):
         raise FlowError(str(message))
 
     def tick(self):
-        self.count += 1
-        if self.count > self.limit:
-            raise FlowError('Execution limit reached; possible infinite loop/recursion.')
+        _execution_tick(self)
 
     @staticmethod
     def string(x):
@@ -1796,6 +1818,8 @@ class Gen(object):
             if isinstance(a.op, ast.Div):
                 return 'Real'
             if isinstance(a.op, ast.Pow):
+                if _negative_integer_exponent(a.right):
+                    return 'Real'
                 return 'Integer' if (l, r) == ('Integer', 'Integer') else 'Real'
             return 'Real' if 'Real' in (l, r) else 'Integer'
         if isinstance(a, ast.UnaryOp):
@@ -1909,7 +1933,10 @@ class Gen(object):
         if op is ast.Pow:
             if self.POWSYM:
                 return self.paren(self.sub(a.left, 10) + self.POWSYM + self.sub(a.right, 10), 9)
-            return self.pow(self.ex(a.left), self.ex(a.right), lt, rt), 100
+            left = self.ex(a.left)
+            if lt == 'Integer' and rt == 'Integer' and _negative_integer_exponent(a.right):
+                left, lt = self.int2real(left, wrap=True), 'Real'
+            return self.pow(left, self.ex(a.right), lt, rt), 100
         if op is ast.Div:
             return self.rdiv(a.left, a.right, lt, rt)
         if op is ast.FloorDiv:
@@ -3211,7 +3238,10 @@ class MatlabGen(Gen):
 
     def concat(self, left, right):
         parts = self.concat_parts(left) + self.concat_parts(right)
-        return '[' + ', '.join(parts) + ']', 100
+        # An explicit concatenation call distinguishes text from numeric array
+        # literals when the generated source is imported again. horzcat keeps
+        # trailing spaces, unlike strcat on MATLAB character arrays.
+        return 'horzcat(' + ', '.join(parts) + ')', 100
 
     def index(self, base, idx, a):
         k = idx_literal(a)
@@ -4405,6 +4435,14 @@ def cval(n):
     return False, None
 
 
+def _negative_integer_exponent(value):
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+        known, number = cval(value.operand)
+        return known and isinstance(number, int) and not isinstance(number, bool) and number > 0
+    known, number = cval(value)
+    return known and isinstance(number, int) and not isinstance(number, bool) and number < 0
+
+
 class Scope(object):
     def __init__(self, name):
         self.name = name
@@ -4509,6 +4547,8 @@ class PyImporter(object):
             if isinstance(n.op, ast.Div):
                 return 'Real'
             if isinstance(n.op, ast.Pow):
+                if _negative_integer_exponent(n.right):
+                    return 'Real'
                 return 'Integer' if (l, r) == ('Integer', 'Integer') else 'Real' if l and r else None
             if l is None or r is None:
                 return l or r
@@ -4676,7 +4716,8 @@ class PyImporter(object):
             return self.S(n.left, p) + ' ' + sym + ' ' + self.S(n.right, p, True), p
         if isinstance(n, ast.UnaryOp):
             if isinstance(n.op, ast.Not):
-                if self.ctype(n.operand) in ('Integer', 'Real') and not isinstance(n.operand, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+                if self.ctype(n.operand) in ('Integer', 'Real') and not isinstance(n.operand, (ast.Compare, ast.BoolOp, ast.UnaryOp)) \
+                        and not (isinstance(n.operand, ast.Name) and sc.vars.get(n.operand.id, [None, False])[1]):
                     return self.S(n.operand, PREC['cmp']) + ' == 0', PREC['cmp']
                 return 'not ' + self.SB(n.operand, PREC['not']), PREC['not']
             if isinstance(n.op, ast.USub):
@@ -4692,6 +4733,12 @@ class PyImporter(object):
             syms = {ast.Eq: '==', ast.NotEq: '!=', ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>='}
             parts, left = [], n.left
             for op, right in zip(n.ops, n.comparators):
+                lt, rt = self.ctype(left), self.ctype(right)
+                if isinstance(op, (ast.Eq, ast.NotEq)) and ((lt == 'String' and rt in ('Integer', 'Real', 'Boolean')) or
+                                                           (rt == 'String' and lt in ('Integer', 'Real', 'Boolean'))):
+                    parts.append('true' if isinstance(op, ast.NotEq) else 'false')
+                    left = right
+                    continue
                 if isinstance(op, (ast.In, ast.NotIn)) and self.ctype(right) == 'String':
                     c = 'Contains(' + self.S(right) + ', ' + self.S(left) + ')'
                     parts.append(c if isinstance(op, ast.In) else 'not ' + c)
@@ -4713,6 +4760,8 @@ class PyImporter(object):
         ok, v = cval(n)
         if ok and isinstance(v, (int, float)) and not isinstance(v, bool):
             return ('true' if v else 'false'), PREC['atom']
+        if isinstance(n, ast.Name) and self.cur_scope.vars.get(n.id, [None, False])[1]:
+            return 'Length(' + self.S(n) + ') != 0', PREC['cmp']
         if self.ctype(n) == 'String':
             return 'Length(' + self.S(n) + ') != 0', PREC['cmp']
         if not isinstance(n, (ast.Compare, ast.BoolOp, ast.UnaryOp)) and self.ctype(n) in ('Integer', 'Real') \
@@ -5566,19 +5615,23 @@ def lower_portable_collections(tree):
             if isinstance(value, ast.Dict):
                 return self.dictionary(value, prefix, depth)
             if isinstance(value, (ast.List, ast.Tuple)):
-                array = ast.List(elts=[self.expr(x, prefix, depth) for x in value.elts], ctx=ast.Load())
                 temp = self.fresh('items')
-                statement = self.assign(temp, array)
-                if depth:
-                    if not all(cval(x)[0] for x in array.elts):
-                        self.fail(value, 'nested collection literals need scalar literal elements for portable conversion')
-                    self.hoisted.append(statement)
-                else:
-                    prefix.append(statement)
+                # Allocate fixed storage once, but evaluate literal elements in
+                # their original scope on every execution of the expression.
+                elements = []
+                array = ast.List(elts=[], ctx=ast.Load())
+                array._portable_size = len(value.elts)
+                array._portable_type_values = elements
+                self.hoisted.append(self.assign(temp, array))
+                for index, item in enumerate(value.elts):
+                    transformed = self.expr(item, prefix, depth)
+                    elements.append(copy.deepcopy(transformed))
+                    prefix.append(self.assign(self.index(self.name(temp), K(index), True), transformed))
                 return {'kind': 'sequence', 'expr': self.name(temp), 'string': False}
-            if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and not value.args:
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and not value.args and not value.keywords:
                 base = value.func.value
-                desc = self.env.get(base.id) if isinstance(base, ast.Name) else None
+                desc = (self.dictionary(base, prefix, depth) if isinstance(base, ast.Dict)
+                        else self.checked(self.env.get(base.id), base) if isinstance(base, ast.Name) else None)
                 if desc and desc['kind'] == 'dict' and value.func.attr in ('keys', 'values', 'items'):
                     return {'kind': value.func.attr, 'dict': desc}
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ('list', 'tuple') and len(value.args) == 1 and not value.keywords:
@@ -5659,6 +5712,54 @@ def lower_portable_collections(tree):
             prefix.append(self.assign(temp, value))
             return self.name(temp)
 
+        def dictionary_get(self, desc, value, prefix, depth):
+            if value.keywords or len(value.args) not in (1, 2):
+                self.fail(value, 'dictionary get() accepts a key and an optional positional default')
+            key = self.expr(value.args[0], prefix, depth)
+            if len(value.args) == 1:
+                # An omitted default can produce None, which the portable
+                # scalar types cannot store. A known existing key is exact.
+                ok, constant = cval(key)
+                if not ok or constant not in desc['known']:
+                    self.fail(value, 'portable dictionary get() needs an explicit scalar default when the key may be absent')
+                index = self.dictionary_index(desc, key, value, prefix, depth)
+                return self.index(desc['values'], index)
+            # Python evaluates both arguments before performing the lookup,
+            # even when the key exists. Snapshot the key before the default.
+            key = self.snapshot(key, prefix, 'get_key')
+            default = self.snapshot(self.expr(value.args[1], prefix, depth), prefix, 'get_default')
+            if not desc['known']:
+                return default
+            index = self.dictionary_index(desc, key, value, prefix, depth, required=False)
+            present = ast.Compare(left=copy.deepcopy(index), ops=[ast.Lt()], comparators=[K(len(desc['known']))])
+            result = self.fresh('get_result')
+            prefix.append(ast.If(test=present,
+                                 body=[self.assign(result, self.index(desc['values'], index))],
+                                 orelse=[self.assign(result, default)]))
+            return self.name(result)
+
+        def sequence_index(self, value, prefix, depth):
+            base = value.value
+            if isinstance(base, (ast.List, ast.Tuple)):
+                base = self.sequence(base, prefix, depth)['expr']
+            else:
+                base = self.expr(base, prefix, depth)
+                # Array names denote references in the portable model, so do
+                # not copy them through a scalar temporary. Other supported
+                # bases (text literals/calls) are captured before the index.
+                if not isinstance(base, ast.Name):
+                    base = self.snapshot(base, prefix, 'indexed_sequence')
+            key = self.snapshot(self.expr(pslice(value), prefix, depth), prefix, 'sequence_index')
+            length = self.call('len', [copy.deepcopy(base)])
+            negative = ast.Compare(left=copy.deepcopy(key), ops=[ast.Lt()], comparators=[K(0)])
+            adjusted = ast.BinOp(left=copy.deepcopy(key), op=ast.Add(), right=copy.deepcopy(length))
+            prefix.append(ast.If(test=negative, body=[self.assign(key.id, adjusted)], orelse=[]))
+            invalid = ast.BoolOp(op=ast.Or(), values=[
+                ast.Compare(left=copy.deepcopy(key), ops=[ast.Lt()], comparators=[K(0)]),
+                ast.Compare(left=copy.deepcopy(key), ops=[ast.GtE()], comparators=[length])])
+            prefix.append(ast.If(test=invalid, body=[self.failure('Sequence index out of range')], orelse=[]))
+            return self.index(base, key, isinstance(value.ctx, ast.Store))
+
         def ordered(self, children, prefix, depth):
             result = []
             for child in children:
@@ -5668,15 +5769,28 @@ def lower_portable_collections(tree):
                     # Earlier reads/calls precede a later child's statements.
                     # In particular f(), {'a': g()}[key] must call f before g.
                     for i, prior in enumerate(result):
-                        if not cval(prior)[0]:
+                        desc = self.env.get(prior.id) if isinstance(prior, ast.Name) else None
+                        array_reference = desc and desc['kind'] == 'sequence' and not desc.get('string')
+                        if not cval(prior)[0] and not array_reference:
                             result[i] = self.snapshot(prior, prefix)
                     prefix.extend(before)
                 result.append(changed)
             return result
 
-        def expr(self, value, prefix, depth):
+        def expr(self, value, prefix, depth, truth=False):
             if value is None:
                 return None
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == 'bool'
+                    and len(value.args) == 1 and not value.keywords and not hasattr(value, '_portable_call_slots')):
+                argument = value.args[0]
+                desc = self.checked(self.env.get(argument.id), argument) if isinstance(argument, ast.Name) else None
+                if isinstance(argument, ast.Dict):
+                    desc = self.dictionary(argument, prefix, depth)
+                elif isinstance(argument, (ast.List, ast.Tuple)):
+                    desc = self.sequence(argument, prefix, depth)
+                if desc and desc['kind'] in ('dict', 'sequence'):
+                    base = desc['keys'] if desc['kind'] == 'dict' else desc['expr']
+                    return ast.Compare(left=self.call('len', [copy.deepcopy(base)]), ops=[ast.NotEq()], comparators=[K(0)])
             if isinstance(value, ast.Name):
                 desc = self.checked(self.env.get(value.id), value)
                 if desc and desc['kind'] in ('dict', 'range'):
@@ -5690,13 +5804,29 @@ def lower_portable_collections(tree):
                     key = self.expr(pslice(value), prefix, depth)
                     return self.index(desc['values'], self.dictionary_index(desc, key, value, prefix, depth), isinstance(value.ctx, ast.Store))
                 if not isinstance(pslice(value), ast.Slice):
-                    base, key = self.ordered([value.value, pslice(value)], prefix, depth)
-                    return self.index(base, key, isinstance(value.ctx, ast.Store))
+                    return self.sequence_index(value, prefix, depth)
+            if isinstance(value, ast.Compare) and len(value.ops) == 1 and isinstance(value.ops[0], (ast.In, ast.NotIn)):
+                container = value.comparators[0]
+                desc = self.checked(self.env.get(container.id), container) if isinstance(container, ast.Name) else None
+                if isinstance(container, ast.Dict) or desc and desc['kind'] == 'dict':
+                    # Membership evaluates its left operand before constructing
+                    # the dictionary, including all dictionary value effects.
+                    key = self.snapshot(self.expr(value.left, prefix, depth), prefix, 'membership_key')
+                    if isinstance(container, ast.Dict):
+                        desc = self.dictionary(container, prefix, depth)
+                    if not desc['known']:
+                        return K(isinstance(value.ops[0], ast.NotIn))
+                    index = self.dictionary_index(desc, key, value, prefix, depth, required=False)
+                    op = ast.Lt() if isinstance(value.ops[0], ast.In) else ast.Eq()
+                    return ast.Compare(left=index, ops=[op], comparators=[K(len(desc['known']))])
             if isinstance(value, ast.IfExp):
-                test = self.expr(value.test, prefix, depth)
+                test = self.expr(value.test, prefix, depth, True)
                 yes, no = [], []
-                body, other = self.expr(value.body, yes, depth), self.expr(value.orelse, no, depth)
+                body, other = self.expr(value.body, yes, depth, truth), self.expr(value.orelse, no, depth, truth)
                 if yes or no:
+                    if truth:
+                        body = ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=body))
+                        other = ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=other))
                     temp = self.fresh('conditional')
                     prefix.append(ast.If(test=test, body=yes + [self.assign(temp, body)], orelse=no + [self.assign(temp, other)]))
                     return self.name(temp)
@@ -5706,8 +5836,11 @@ def lower_portable_collections(tree):
                 pieces = []
                 for part in value.values:
                     before = []
-                    pieces.append((before, self.expr(part, before, depth)))
+                    pieces.append((before, self.expr(part, before, depth, truth)))
                 if any(before for before, part in pieces):
+                    if truth:
+                        pieces = [(before, ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=part)))
+                                  for before, part in pieces]
                     temp = self.fresh('boolean')
                     first, part = pieces[0]
                     prefix.extend(first + [self.assign(temp, part)])
@@ -5718,6 +5851,9 @@ def lower_portable_collections(tree):
                         prefix.append(ast.If(test=test, body=before + [self.assign(temp, part)], orelse=[]))
                     return self.name(temp)
                 value.values = [part for before, part in pieces]
+                return value
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not):
+                value.operand = self.expr(value.operand, prefix, depth, True)
                 return value
             if isinstance(value, ast.Compare) and len(value.ops) > 1:
                 children = []
@@ -5747,9 +5883,12 @@ def lower_portable_collections(tree):
                     return self.call('len', [copy.deepcopy(desc['keys'])])
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
                 base = value.func.value
-                desc = self.env.get(base.id) if isinstance(base, ast.Name) else None
+                desc = (self.dictionary(base, prefix, depth) if isinstance(base, ast.Dict)
+                        else self.checked(self.env.get(base.id), base) if isinstance(base, ast.Name) else None)
                 if desc and desc['kind'] == 'dict':
-                    self.fail(value, 'dictionary methods are portable when used in keys(), values() or items() iteration')
+                    if value.func.attr == 'get':
+                        return self.dictionary_get(desc, value, prefix, depth)
+                    self.fail(value, 'portable dictionary methods support get(key, default) and keys(), values() or items() iteration')
             if isinstance(value, ast.Dict):
                 self.fail(value, 'use a named dictionary or iterate its keys, values or items for portable conversion')
             if isinstance(value, ast.Call):
@@ -5901,7 +6040,7 @@ def lower_portable_collections(tree):
                             self.env.pop(name, None)
                     statement.value = transformed_value
                 elif isinstance(statement, (ast.If, ast.While)):
-                    statement.test = self.expr(statement.test, prefix, depth)
+                    statement.test = self.expr(statement.test, prefix, depth, True)
                     if isinstance(statement, ast.While):
                         self.loop_blocks(statement, depth)
                     else:
@@ -6025,6 +6164,48 @@ def lower_portable_controls(tree):
             if value is None:
                 return [], None
             value = copy.deepcopy(value)
+            if isinstance(value, ast.Call) and hasattr(value, '_portable_call_slots'):
+                pre, supplied = [], []
+                for argument in value.args:
+                    before, expression = self.expr(argument)
+                    pre.extend(before)
+                    # Names preserve array references as well as scalar values;
+                    # calls/subscripts are evaluated once before later arguments.
+                    if not isinstance(expression, ast.Name) and not cval(expression)[0]:
+                        expression = self.snapshot(expression, pre, 'argument')
+                    supplied.append(expression)
+                value.args = [self.name(slot) if isinstance(slot, str) else supplied[slot]
+                              for slot in value._portable_call_slots]
+                value.args.extend(self.name(capture) for capture in value._portable_call_captures)
+                del value._portable_call_slots
+                del value._portable_call_captures
+                return pre, value
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == 'bool' and not value.keywords:
+                if not value.args:
+                    return [], self.const(False)
+                if len(value.args) == 1:
+                    known, scalar = cval(value.args[0])
+                    if known:
+                        return [], self.const(bool(scalar))
+                    pre, argument = self.expr(value.args[0], True)
+                    return pre, ast.UnaryOp(op=ast.Not(), operand=ast.UnaryOp(op=ast.Not(), operand=argument))
+            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mod):
+                # Python's remainder follows the divisor's sign. Native C-like
+                # remainder operators instead follow the dividend, and cannot
+                # represent this expression directly. Freeze both operands in
+                # source order before reusing them in the floor-based formula.
+                pre, left = self.expr(value.left)
+                left = self.snapshot(left, pre, 'remainder_left')
+                before, right = self.expr(value.right)
+                pre.extend(before)
+                right = self.snapshot(right, pre, 'remainder_right')
+                failure = self.call('Fail', [self.const('Division by zero in remainder')])
+                failure._portable_fail = True
+                pre.append(ast.If(test=ast.Compare(left=right, ops=[ast.Eq()], comparators=[self.const(0)]),
+                                  body=[ast.Expr(value=failure)], orelse=[]))
+                quotient = ast.BinOp(left=left, op=ast.FloorDiv(), right=right)
+                product = ast.BinOp(left=quotient, op=ast.Mult(), right=right)
+                return pre, ast.BinOp(left=left, op=ast.Sub(), right=product)
             special = self.input_call(value)
             if special is not None:
                 pre, args = self.ordered(special.args)
@@ -6080,6 +6261,13 @@ def lower_portable_controls(tree):
                         inner.append(self.assign(previous.id, current))
                         pre.append(ast.If(test=self.name(result), body=inner, orelse=[]))
                     return pre, self.name(result)
+            if isinstance(value, ast.Compare) and len(value.ops) == 1 and isinstance(value.ops[0], (ast.Eq, ast.NotEq)) and any(isinstance(n, ast.Call) for n in ast.walk(value)):
+                # A statically unequal string/number comparison can become a
+                # Boolean literal later. Preserve both operand evaluations.
+                pre, operands = self.ordered([value.left, value.comparators[0]])
+                value.left = self.snapshot(operands[0], pre, 'equality')
+                value.comparators = [self.snapshot(operands[1], pre, 'equality')]
+                return pre, value
             # Regular expression children can be lowered in their AST order.
             children, slots = [], []
             for field, child in ast.iter_fields(value):
@@ -6167,6 +6355,13 @@ def lower_portable_controls(tree):
                 return pre
             if isinstance(s, ast.Break):
                 return ([self.assign(self.flags[-1], self.const(False))] if self.flags and self.flags[-1] else []) + [s]
+            if isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Mod):
+                previous = copy.deepcopy(s.target)
+                for part in ast.walk(previous):
+                    if hasattr(part, 'ctx'):
+                        part.ctx = ast.Load()
+                pre, expression = self.expr(ast.BinOp(left=previous, op=ast.Mod(), right=s.value))
+                return pre + [ast.Assign(targets=[s.target], value=expression)]
             if isinstance(s, (ast.Assign, ast.AugAssign, ast.Expr, ast.Return)):
                 if getattr(s, 'value', None) is not None:
                     pre, s.value = self.expr(s.value)
@@ -6192,11 +6387,184 @@ def lower_portable_controls(tree):
     return ast.fix_missing_locations(tree)
 
 
+def lower_portable_assignments(tree):
+    """Evaluate a chained assignment once before binding its targets in order."""
+    used = set(n.id for n in ast.walk(tree) if isinstance(n, ast.Name))
+    counter = [0]
+    class Assignments(ast.NodeTransformer):
+        def visit_Assign(self, statement):
+            statement = self.generic_visit(statement)
+            if len(statement.targets) < 2:
+                return statement
+            while True:
+                counter[0] += 1
+                temp = 'flowAssignedValue' + str(counter[0])
+                if temp not in used:
+                    used.add(temp)
+                    break
+            result = [ast.Assign(targets=[ast.Name(id=temp, ctx=ast.Store())], value=statement.value)]
+            for target in statement.targets:
+                result.append(ast.Assign(targets=[target], value=ast.Name(id=temp, ctx=ast.Load())))
+            return [ast.copy_location(item, statement) for item in result]
+    return ast.fix_missing_locations(Assignments().visit(tree))
+
+
+def lower_portable_functions(tree):
+    """Bind scalar defaults once and normalize keyword calls for all targets.
+
+    Captured defaults are explicit hidden parameters where another function
+    needs them. This avoids relying on target-language globals or optional-arg
+    syntax, while preserving Python's definition-time evaluation semantics.
+    """
+    definitions = dict((n.name, n) for n in tree.body if isinstance(n, ast.FunctionDef))
+    if not definitions:
+        return tree
+    used = set(n.id for n in ast.walk(tree) if isinstance(n, ast.Name))
+    used.update(definitions)
+    for definition in definitions.values():
+        used.update(a.arg for a in definition.args.args)
+    serial = [0]
+    def fresh():
+        while True:
+            serial[0] += 1
+            name = 'flowDefault' + str(serial[0])
+            if name not in used:
+                used.add(name)
+                return name
+    def fail(n, message):
+        raise Unsupported('Line {0}: {1}'.format(getattr(n, 'lineno', '?'), message))
+    def name(value, store=False):
+        return ast.Name(id=value, ctx=ast.Store() if store else ast.Load())
+    parameters, defaults, ordered_defaults = {}, {}, []
+    collection_names = set()
+    def collection_value(expression):
+        return (isinstance(expression, (ast.List, ast.Tuple, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)) or
+                isinstance(expression, ast.Name) and expression.id in collection_names or
+                isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name)
+                and expression.func.id in ('list', 'tuple', 'dict', 'set'))
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    if collection_value(statement.value):
+                        collection_names.add(target.id)
+                    else:
+                        collection_names.discard(target.id)
+        if not isinstance(statement, ast.FunctionDef):
+            continue
+        args = statement.args
+        if args.vararg or args.kwarg or getattr(args, 'kwonlyargs', []) or getattr(args, 'posonlyargs', []):
+            fail(statement, 'portable functions need ordinary positional parameters, optionally with scalar defaults')
+        params = [a.arg for a in args.args]
+        parameters[statement.name] = params
+        mapping = {}
+        first = len(params) - len(args.defaults)
+        for index, expression in enumerate(args.defaults, first):
+            if collection_value(expression):
+                fail(expression, 'portable function defaults must be scalar values')
+            temp = fresh()
+            mapping[index] = temp
+            ordered_defaults.append((statement, temp, expression))
+        defaults[statement.name] = mapping
+
+    def binding(call):
+        params = parameters[call.func.id]
+        if any(isinstance(arg, ast.Starred) for arg in call.args) or getattr(call, 'starargs', None) or getattr(call, 'kwargs', None):
+            fail(call, 'expanded function arguments are not portable')
+        if len(call.args) > len(params):
+            fail(call, 'too many arguments for ' + call.func.id)
+        slots = [None] * len(params)
+        for index in range(len(call.args)):
+            slots[index] = index
+        for index, keyword in enumerate(call.keywords, len(call.args)):
+            if keyword.arg not in params:
+                fail(call, 'unknown keyword argument {0} for {1}'.format(keyword.arg, call.func.id))
+            position = params.index(keyword.arg)
+            if slots[position] is not None:
+                fail(call, 'argument {0} supplied more than once for {1}'.format(keyword.arg, call.func.id))
+            slots[position] = index
+        for index, slot in enumerate(slots):
+            if slot is None:
+                if index not in defaults[call.func.id]:
+                    fail(call, 'missing argument {0} for {1}'.format(params[index], call.func.id))
+                slots[index] = defaults[call.func.id][index]
+        return slots
+
+    def calls(nodes):
+        result = []
+        for node in nodes:
+            for part in ast.walk(node):
+                if isinstance(part, ast.Call) and isinstance(part.func, ast.Name) and part.func.id in definitions:
+                    result.append(part)
+        return result
+
+    function_calls = dict((key, calls(definition.body)) for key, definition in definitions.items())
+    needed = {}
+    for key, entries in function_calls.items():
+        needed[key] = set(slot for call in entries for slot in binding(call) if isinstance(slot, str))
+    changed = True
+    while changed:
+        changed = False
+        for key, entries in function_calls.items():
+            captures = set(needed[key])
+            for call in entries:
+                captures.update(needed[call.func.id])
+            if captures != needed[key]:
+                needed[key] = captures
+                changed = True
+    captures = dict((key, sorted(values)) for key, values in needed.items())
+
+    class BindCalls(ast.NodeTransformer):
+        def visit_Call(self, call):
+            call = self.generic_visit(call)
+            if not isinstance(call.func, ast.Name) or call.func.id not in definitions:
+                return call
+            slots = binding(call)
+            # Even fully positional calls need ordering: C/C++ may evaluate
+            # arguments in reverse order, while Python always evaluates them
+            # left to right. Keep that order until statement lowering.
+            call._portable_call_slots = slots
+            call._portable_call_captures = captures[call.func.id]
+            call.args += [keyword.value for keyword in call.keywords]
+            call.keywords = []
+            return call
+
+    transform = BindCalls()
+    bound = set()
+    output = []
+    for statement in tree.body:
+        if isinstance(statement, ast.FunctionDef):
+            for owner, temp, expression in ordered_defaults:
+                if owner is statement:
+                    for call in calls([expression]):
+                        required = set(slot for slot in binding(call) if isinstance(slot, str)) | needed[call.func.id]
+                        if required - bound:
+                            fail(call, 'a required function default has not been evaluated yet')
+                    assignment = ast.Assign(targets=[name(temp, True)], value=transform.visit(expression))
+                    output.append(ast.copy_location(assignment, statement))
+                    bound.add(temp)
+            statement.args.defaults = []
+            statement.body = [transform.visit(node) for node in statement.body]
+            for capture in captures[statement.name]:
+                statement.args.args.append(ast.arg(arg=capture, annotation=None))
+            output.append(statement)
+        else:
+            for call in calls([statement]):
+                required = set(slot for slot in binding(call) if isinstance(slot, str)) | needed[call.func.id]
+                if required - bound:
+                    fail(call, 'a required function default has not been evaluated yet')
+            output.append(transform.visit(statement))
+    tree.body = output
+    return ast.fix_missing_locations(tree)
+
+
 def _portable_python_document(doc):
     """Lower representable Python constructs into the shared target model."""
     source = generate_python_document(doc)
     try:
         tree = ast.parse(source)
+        tree = lower_portable_assignments(tree)
+        tree = lower_portable_functions(tree)
         tree = lower_portable_collections(tree)
         tree = _lower_python_join_generators(tree)
         tree = _lower_python_expression_comprehensions(tree)
@@ -9883,6 +10251,13 @@ class MatlabFront(RMBase):
         name = callee.id if isinstance(callee, ast.Name) else None
         if name is None:
             self.err('this call is not supported')
+        if name == 'horzcat':
+            if not args:
+                return K('')
+            result = args[0]
+            for part in args[1:]:
+                result = BIN(ast.BitAnd, result, part)
+            return result
         if name in ('disp', 'display'):
             return self.print_call(args[:1], True)
         if name in ('fprintf', 'printf'):
@@ -9997,7 +10372,8 @@ statements, positional-only/keyword-only parameters and *args/**kwargs function
 signatures. Unsafe/private attributes are rejected. Some valid Python therefore
 cannot be represented; the error should identify the unsupported construct.
 This interpreter is an educational subset, not a security sandbox for hostile
-code. Execution and sequence-allocation limits help catch runaway programs.
+code. Pause/Stop interrupt desktop execution. Optional operation budgets are
+available for terminal/API runs; sequence-allocation and call-depth limits remain.
 
 PORTABLE CHARTS AND OTHER LANGUAGES
 The original portable model remains available: Integer/Real/String/Boolean,
@@ -10012,10 +10388,20 @@ evaluated eagerly in source order, including repeated keys, inside their origina
 loop or branch; a missing lookup key stops execution with an error. Dictionary
 keys must be scalar literals, and array element types must fit the portable
 scalar model. Python and/or retain operand values and short-circuit evaluation.
-Dynamic map resizing, heterogeneous collections,
-and unsupported library features still report a conversion error. Target-parser validation
+Portable conversion also supports scalar function defaults and keyword calls,
+chained scalar assignments, dictionary get(key, default) and key membership,
+negative sequence indexes with bounds checks, bool(), signed remainders and
+negative constant exponents. Defaults evaluate once at definition time; call
+arguments evaluate in Python's source order. MATLAB text concatenation preserves
+spaces. get(key) without a default requires a known present key because portable
+scalars cannot store None. Mutable function defaults, dynamic map resizing,
+heterogeneous collections, slices and general sorting/reversal are outside
+portable conversion. Target-parser validation
 does not prove external-compiler acceptance or semantic equivalence. Compiler
 and runtime availability varies by machine; no external compiler is bundled.
+Target numeric widths and rounding can differ from Python; tie-even round()
+and powers with a runtime exponent that changes the result's numeric type are
+not guaranteed to preserve Python behavior.
 
 EDITOR
 Flowchart editing, symbol insertion and dragging, undo/redo, functions,
@@ -10031,7 +10417,7 @@ re-import with CPython, including collection loops, input expressions, iterator
 bounds, mutation, source-order defaults and JSON persistence. A passing suite
 covers its fixtures, not every possible Python program or external language.
 
-Requires Python 3.3+ and only the standard library. The desktop interface needs
+Requires Python 3.2+ and only the standard library. The desktop interface needs
 Tkinter/Tk and a graphical display; headless CLI operation does not import Tk.
 """
 def label(n):
@@ -10462,6 +10848,13 @@ def launch_gui(initial_path=None):
             self.current_node = None
             self.running = False
             self.timer = None
+            self._advancing = False
+            self._manual_step = False
+            self._execution_waiting = False
+            self._execution_gate = tk.IntVar(value=0)
+            self._checkpoint_at = 0.0
+            self._deferred_action = None
+            self._closing = False
             self.zoom = 1.0
             self.source = None
             self.code_timer = None
@@ -10561,7 +10954,7 @@ def launch_gui(initial_path=None):
             helpmenu.add_command(label='Capabilities and limitations', command=self.help)
             helpmenu.add_command(label='Symbol guide', command=self.symbol_guide)
             helpmenu.add_command(label='Expression reference', command=self.expression_help)
-            helpmenu.add_command(label='About', command=lambda: messagebox.showinfo('About', 'Flowchart Studio ' + VERSION + '\nIndependent standard-library Python 3.3+ application.\nNot affiliated with Flowgorithm.', parent=self.root))
+            helpmenu.add_command(label='About', command=lambda: messagebox.showinfo('About', 'Flowchart Studio ' + VERSION + '\nIndependent standard-library Python 3.2+ application.\nNot affiliated with Flowgorithm.', parent=self.root))
             menu.add_cascade(label='Help', menu=helpmenu)
             toolbar = ttk.Frame(self.root, padding=(10, 5))
             toolbar.pack(fill='x')
@@ -12292,8 +12685,11 @@ def launch_gui(initial_path=None):
             self.console.configure(state='disabled')
 
         def read_input(self, name):
+            engine = self.engine
             self.show_tools(1)
             value = simpledialog.askstring('Input', 'Value for ' + name + ':', parent=self.root)
+            if self._closing or self.engine is not engine:
+                raise ExecutionStopped()
             if value is not None:
                 self.log('> ' + value)
             return value
@@ -12308,13 +12704,28 @@ def launch_gui(initial_path=None):
                     self.variables.insert('', 'end', text=name, values=(typ + ('[]' if array else ''), value[:500]))
 
         def start_engine(self):
+            if self._advancing or self._closing:
+                return False
             if not self.sync_source():
                 return False
             if self.iterator is not None:
                 return True
             try:
-                self.engine = Interpreter(self.doc, self.read_input, self.log)
-                self.iterator = self.engine.steps()
+                def read(name):
+                    value = self.read_input(name)
+                    # Dialogs run Tk's event loop: editing or stopping there
+                    # must cancel the old input before its assignment resumes.
+                    self.execution_checkpoint(engine, force=True)
+                    return value
+                def write(value, newline):
+                    if self._closing or self.engine is not engine:
+                        raise ExecutionStopped()
+                    self.log(value, newline)
+                engine = Interpreter(self.doc, read, write,
+                                     checkpoint=lambda: self.execution_checkpoint(engine))
+                self.engine = engine
+                self.iterator = engine.steps()
+                self._checkpoint_at = _CLOCK()
                 self.clear_console()
                 self.log('--- Execution started ---')
                 self.show_tools(1)
@@ -12323,9 +12734,54 @@ def launch_gui(initial_path=None):
                 messagebox.showerror('Cannot run', str(e), parent=self.root)
                 return False
 
-        def advance(self, render=True):
+        def wake_execution(self):
             try:
-                self.current_node = next(self.iterator)
+                self._execution_gate.set(self._execution_gate.get() + 1)
+            except tk.TclError:
+                pass
+
+        def execution_checkpoint(self, engine, force=False):
+            """Keep long expressions responsive without discarding their stack."""
+            if self._closing or self.engine is not engine:
+                raise ExecutionStopped()
+            now = _CLOCK()
+            if not force and now - self._checkpoint_at < 0.02:
+                return
+            self._checkpoint_at = now
+            try:
+                if not self.root.winfo_exists():
+                    self._closing = True
+                    raise ExecutionStopped()
+                self.root.update()
+                if not self.root.winfo_exists():
+                    self._closing = True
+                    raise ExecutionStopped()
+                if self._closing or self.engine is not engine:
+                    raise ExecutionStopped()
+                while not self.running and not self._manual_step:
+                    self._execution_waiting = True
+                    self.status.set('Paused. Run continues; Step finishes the current instruction.')
+                    self.root.wait_variable(self._execution_gate)
+                    if self._closing or self.engine is not engine:
+                        raise ExecutionStopped()
+            except tk.TclError:
+                self._closing = True
+                raise ExecutionStopped()
+            finally:
+                self._execution_waiting = False
+            self._checkpoint_at = _CLOCK()
+
+        def advance(self, render=True):
+            if self._advancing or self.iterator is None or self._closing:
+                return False
+            iterator, engine = self.iterator, self.engine
+            self._advancing = True
+            self._manual_step = not self.running
+            try:
+                current = next(iterator)
+                if self._closing or self.engine is not engine or self.iterator is not iterator:
+                    raise ExecutionStopped()
+                self.current_node = current
                 if render:
                     self.inspect_variables()
                     iid = self.node_iids.get(id(self.current_node))
@@ -12335,38 +12791,80 @@ def launch_gui(initial_path=None):
                     self.draw()
                     self.status.set('About to execute: ' + label(self.current_node))
                 return True
+            except ExecutionStopped:
+                if not self._closing and self.engine is engine:
+                    self.pause()
+                    self.iterator = None
+                    self.engine = None
+                    self.current_node = None
+                    self.inspect_variables()
+                    self.draw()
+                    self.status.set('Stopped / reset.')
             except StopIteration:
-                self.pause()
-                self.iterator = None
-                self.current_node = None
-                self.inspect_variables()
-                self.draw()
-                self.log('--- Execution finished ---')
-                self.status.set('Finished. Variables contain final values.')
+                if not self._closing and self.engine is engine:
+                    self.pause()
+                    self.iterator = None
+                    self.current_node = None
+                    self.inspect_variables()
+                    self.draw()
+                    self.log('--- Execution finished ---')
+                    self.status.set('Finished. Variables contain final values.')
             except Exception as e:
-                self.pause()
-                self.iterator = None
-                self.inspect_variables()
-                self.log('ERROR: ' + str(e))
-                self.status.set('Execution error: ' + str(e))
-                self.draw()
+                if not self._closing and self.engine is engine:
+                    self.pause()
+                    self.iterator = None
+                    self.inspect_variables()
+                    self.log('ERROR: ' + str(e))
+                    self.status.set('Execution error: ' + str(e))
+                    self.draw()
+            finally:
+                self._advancing = False
+                self._manual_step = False
+                if self.iterator is not iterator:
+                    iterator.close()
+                action, self._deferred_action = self._deferred_action, None
+                if action is not None and not self._closing:
+                    self.timer = self.root.after(0, self.run if action == 'run' else self.step)
             return False
 
         def step(self):
+            if self._advancing:
+                if self.engine is None:
+                    self._deferred_action = 'step'
+                else:
+                    self.pause()
+                    self._manual_step = True
+                    self.wake_execution()
+                return
             self.pause()
             if self.start_engine():
                 self.advance()
+                if self.running and self.timer is None:
+                    self.timer = self.root.after(1, self.schedule_tick)
 
         def run(self):
             if self.running:
                 return
+            if self._advancing:
+                if self.engine is None:
+                    self._deferred_action = 'run'
+                else:
+                    self.running = True
+                    self._manual_step = False
+                    self.wake_execution()
+                    self.status.set('Running...')
+                return
             if not self.start_engine():
                 return
             self.running = True
+            self._manual_step = False
+            self.wake_execution()
             self.status.set('Running...')
             self.schedule_tick()
 
         def schedule_tick(self):
+            if self._advancing or self._closing:
+                return
             self.timer = None
             if not self.running:
                 return
@@ -12377,6 +12875,7 @@ def launch_gui(initial_path=None):
             if delay == 0:
                 # Batch enough for fast execution, then return to Tk so that
                 # Pause/Stop and other interactions can be handled.
+                deadline = _CLOCK() + 0.02
                 for count in range(120):
                     if not self.running or not self.advance(render=False):
                         return
@@ -12386,11 +12885,19 @@ def launch_gui(initial_path=None):
                         self.draw()
                         self.status.set('Breakpoint: '+label(self.current_node))
                         return
+                    if _CLOCK() >= deadline:
+                        break
+                if not self.running:
+                    self.inspect_variables()
+                    self.draw()
+                    return
                 self.inspect_variables()
                 self.draw()
                 self.timer = self.root.after(1,self.schedule_tick)
                 return
             if not self.advance():
+                return
+            if not self.running:
                 return
             if id(self.current_node) in self.breakpoints:
                 self.pause()
@@ -12400,19 +12907,23 @@ def launch_gui(initial_path=None):
 
         def pause(self):
             self.running = False
+            self._manual_step = False
             if self.timer is not None:
                 self.root.after_cancel(self.timer)
                 self.timer = None
+            self.wake_execution()
 
         def stop(self):
             self._clear_drag_preview()
             self.palette_drag_kind = None
             self.pause()
-            if self.iterator:
-                self.iterator.close()
+            iterator = self.iterator
+            self._deferred_action = None
             self.iterator = None
             self.engine = None
             self.current_node = None
+            if iterator is not None and not self._advancing:
+                iterator.close()
             if hasattr(self, 'variables'):
                 self.inspect_variables()
                 self.draw()
@@ -12500,7 +13011,9 @@ Ctrl+Plus / Ctrl+Minus zoom the diagram; Ctrl+0 resets zoom. Ctrl+mouse-wheel zo
 Use View > Fit diagram to window to fit the current diagram, or search the shape palette by name.
 Stepping pauses BEFORE the highlighted shape; the next step executes it.
 User-defined function calls execute as one debugger step.
-Execution is capped at 100000 operations. Stop resets execution state.
+Normal execution has no total operation cap. Pause/Stop remain available during
+long calculations; Stop resets execution state. Terminal runs can use the
+optional --max-operations budget, or Ctrl+C to interrupt.
 Edits reset the debugger and clear breakpoints, but not the chart.
 
 Save editable flowcharts as .json and export all functions as a vector PDF.
@@ -12510,7 +13023,9 @@ PDFs can use very large pages or multiple pages when the chart is enormous.
         def close(self):
             if self.check_discard():
                 self.close_shape_picker()
-                self.pause()
+                self.stop()
+                self._closing = True
+                self.wake_execution()
                 self.root.destroy()
 
     try:
@@ -12715,6 +13230,24 @@ def self_test():
     import subprocess
     tests = [0]
 
+    def which(command):
+        if hasattr(shutil, 'which'):
+            return shutil.which(command)
+        # shutil.which was added in Python 3.3. This bundled test helper also
+        # supports Python 3.2, including executable suffixes on Windows.
+        paths = os.environ.get('PATH', os.defpath).split(os.pathsep)
+        if os.name == 'nt':
+            paths.insert(0, os.curdir)
+        suffixes = ['']
+        if os.name == 'nt' and not os.path.splitext(command)[1]:
+            suffixes += os.environ.get('PATHEXT', '.COM;.EXE;.BAT;.CMD').split(os.pathsep)
+        for directory in paths:
+            for suffix in suffixes:
+                path = os.path.join(directory, command + suffix)
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return path
+        return None
+
     def check(value, message):
         if not value:
             raise AssertionError(message)
@@ -12846,23 +13379,23 @@ def self_test():
         # instead of trusting only this application's own parser.
         probe = 'x = 2 + 3\nprint(x)\n'
         toolchains = [
-            ('C', 'gcc', 'probe.c', lambda src, exe: [shutil.which('gcc'), src, '-std=c99', '-lm', '-o', exe],
+            ('C', 'gcc', 'probe.c', lambda src, exe: [which('gcc'), src, '-std=c99', '-lm', '-o', exe],
              lambda exe: [exe]),
-            ('C++', 'g++', 'probe.cpp', lambda src, exe: [shutil.which('g++'), src, '-std=c++11', '-o', exe],
+            ('C++', 'g++', 'probe.cpp', lambda src, exe: [which('g++'), src, '-std=c++11', '-o', exe],
              lambda exe: [exe]),
-            ('Java', 'javac', 'Main.java', lambda src, exe: [shutil.which('javac'), src],
-             lambda exe: [shutil.which('java'), '-cp', temp, 'Main']),
+            ('Java', 'javac', 'Main.java', lambda src, exe: [which('javac'), src],
+             lambda exe: [which('java'), '-cp', temp, 'Main']),
             ('JavaScript', 'node', 'probe.js', lambda src, exe: None,
-             lambda exe: [shutil.which('node'), os.path.join(temp, 'probe.js')]),
+             lambda exe: [which('node'), os.path.join(temp, 'probe.js')]),
             ('Go', 'go', 'main.go', lambda src, exe: None,
-             lambda exe: [shutil.which('go'), 'run', os.path.join(temp, 'main.go')]),
+             lambda exe: [which('go'), 'run', os.path.join(temp, 'main.go')]),
         ]
         for lang, tool, filename, build_cmd, run_cmd in toolchains:
-            if not shutil.which(tool):
+            if not which(tool):
                 print('SKIP: {0} external compiler/runtime is unavailable.'.format(lang))
                 continue
             if tool == 'go':
-                version = subprocess.Popen([shutil.which(tool), 'version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                version = subprocess.Popen([which(tool), 'version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 version_output, version_error = version.communicate()
                 if version.returncode or not version_output.startswith(b'go version go'):
                     print('SKIP: executable named go is not a Go compiler.')
@@ -12888,12 +13421,14 @@ def self_test():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Single-file Python 3.3+ flowchart editor and code converter. Standard library only; GUI needs preinstalled Tkinter.')
+    parser = argparse.ArgumentParser(description='Single-file Python 3.2+ flowchart editor and code converter. Standard library only; GUI needs preinstalled Tkinter.')
     parser.add_argument('file', nargs='?', help='Open a saved editable .json flowchart')
     parser.add_argument('--self-test', action='store_true', help='Run bundled headless tests')
     parser.add_argument('--list-languages', action='store_true', help='List supported languages')
     parser.add_argument('--capabilities', action='store_true', help='Print honest feature/support limitations')
     parser.add_argument('--run', metavar='CHART', help='Interpret a chart in the terminal')
+    parser.add_argument('--max-operations', type=int, default=None, metavar='N',
+                        help='Optional total operation budget for --run (default: no limit; Ctrl+C interrupts)')
     parser.add_argument('--generate', metavar='CHART', help='Generate source from a chart (see --language)')
     parser.add_argument('--convert', metavar='SOURCE', help='Convert a source file to another language (needs --to)')
     parser.add_argument('--from-code', metavar='SOURCE', help='Turn source code into a chart file (use -o to save it)')
@@ -12902,6 +13437,8 @@ def main(argv=None):
     parser.add_argument('--language', default=None, choices=LANGUAGES, help='language for --generate')
     parser.add_argument('-o', '--output', help='Write the result to this file instead of stdout')
     args = parser.parse_args(argv)
+    if args.max_operations is not None and args.max_operations < 0:
+        parser.error('--max-operations must be nonnegative')
 
     def emit(text):
         if args.output:
@@ -12923,7 +13460,7 @@ def main(argv=None):
             print(CAPABILITIES)
             return 0
         if args.run:
-            Interpreter(load_document(args.run)).run()
+            Interpreter(load_document(args.run), limit=args.max_operations).run()
             return 0
         if args.generate:
             emit(generate_source(args.language or 'Python', load_document(args.generate)))

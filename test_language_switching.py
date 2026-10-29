@@ -16,6 +16,8 @@ with io.open(APP_PATH, encoding='utf-8') as stream:
     exec(compile(stream.read(), APP_PATH, 'exec'), APP.__dict__)
 
 PROGRAMS = [
+    ('defaults, keywords and chained assignment', "def total(a,b=2):return a+b\nx=y=3\nd={'a':4}\nprint(total(b=d.get('a',0),a=x),y)\n"),
+    ('negative indexing and remainder', "a=[10,20]\nprint(a[-1],-7%3,'hit' if 'x' in {'x':1} else 'miss')\n"),
     ('inline input range', 'for i in range(int(input())+1):print(i)\n'),
     ('assigned tuple', "r=(1,2,3)\nfor i in r:print(i)\n"),
     ('assigned dictionary', "r={'a':1,'b':2}\nfor i in r:print(i)\n"),

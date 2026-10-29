@@ -1,37 +1,53 @@
-Flowchart Studio 3.1.4 - expression and dictionary conversion
+Flowchart Studio 3.1.5 - Python 3.2 compatibility and shared language features
 
-The exact reported alphabet program is saved in examples/alphabet_letters.py.
-No program-specific rewrite is used by the converter.
+The app is one Python file, uses the standard library, and runs on Python 3.2+
+with Tkinter for its desktop UI. Compatibility was tested using a real official
+CPython 3.2.6 build, not only a newer interpreter's grammar mode.
 
-Verified on Python 3.12.14:
-- 525 expression-conversion checks passed. All 14 language options generate
-  source, parse back, and preserve output for the tested fixtures.
-- Actual generated C, C++ and JavaScript match CPython for every letter A-Z at
-  sizes 1 and 2, and A/B/S at size 4. Lowercase input and immediate exit work.
-- Tests include eager dictionary entry evaluation, duplicate overwrites,
-  source-order calls, lazy branches, loop conditions/continue, numeric/string
-  and/or values, safe missing-key failures, and ambiguous-binding rejection.
-- 637 existing Python/conversion checks passed.
+Execution:
+- Removed the default 100,000-operation cutoff. Even one alphabet size 1 letter
+  legitimately exceeded that cutoff. Normal desktop/CLI/API runs are unlimited.
+- Optional explicit budgets remain available via --max-operations or the API.
+- Pause/Run/Step retain an active expression stack. Stop/reset/edit/close cancel
+  old execution without re-entering or closing an executing generator.
+- On Python 3.2 the GUI clock uses a standard-library fallback for monotonic().
 
-Actual desktop language-switching checks:
-- 526 checks passed on Python 3.3.7 / Tk 8.6.
-- The same 526 checks passed on Python 3.12.14 / Tk 9.
-- These paste the exact alphabet program, switch through all 14 languages,
-  check the generated source and preserve the original Python chart.
+Common conversion features added across all 14 language generators:
+- Scalar function defaults evaluate once when the definition executes.
+- Positional/keyword arguments preserve source-order evaluation.
+- Chained scalar assignments evaluate their right-hand side once.
+- Dictionary get(key,default), membership, and literal keys/values/items loops.
+- Negative list/tuple/string indexes, with safe bounds errors.
+- bool() for scalar/container values and array parameters.
+- Python signed integer/real % and %=, including zero-divisor errors.
+- Negative constant integer powers preserve real results.
+- MATLAB string concatenation preserves spaces and reparses correctly.
 
-Python 3.3 compatibility:
-- All 525 new expression-conversion checks passed on actual Python 3.3.7
-  (448 main checks plus 77 additional focused checks).
-- 549 existing regression/conversion checks passed on actual Python 3.3.7.
-- 173 bundled self-test checks passed. Java and Go external execution checks
-  explicitly skipped because suitable compilers were unavailable.
-- The source also passes a Python 3.3 grammar parse.
+Actual Python 3.2.6 validation:
+- 173 bundled self-test checks passed, generating/parsing all 14 languages.
+- 44 actual GUI execution checks passed: full alphabet output, responsive Stop,
+ Pause/Run/Step without duplicate work, replacement, input cancel and closure.
+- 642 actual GUI language-switching checks passed, including the alphabet program
+ and integrated defaults/keywords/dictionary/negative-index/remainder fixtures.
+- 613 collection checks passed, including real C/C++/JavaScript execution.
+- 371 function generation/roundtrip/rejection checks passed.
+- 371 scalar checks passed; its test-only 3.3 subprocess APIs were shimmed for 3.2.
 
-Compiler execution was verified for C/C++ and JavaScript. The remaining
-languages have generation/parser/interpreter coverage; their external compilers
-were not available for validation here. The app remains a finite educational
-converter. Portable dictionary keys are scalar literals and values must fit
-homogeneous scalar arrays. Dynamic resizing and ambiguous dictionary bindings
-across control paths report explicit conversion errors.
+Current Python validation:
+- 2,077 combined native/conversion/feature regression checks passed.
+- 431 function checks passed, including 60 actualC/C++/JavaScript executions.
+- 613 collection and371scalar checks passed with actual target execution.
+- 500 existing cross-language/control regression checks passed.
+- 28 execution-limit/CLI checks and44GUI execution checks passed on both 3.3.7
+ and 3.12.14 before the added conversion features; 98 existing GUI checks passed.
 
-The connector hover/popup and symbol explanations from 3.1.3 remain included.
+Generation and parser/interpreter coverage includes all 14 targets. External
+compiler/runtime execution was checked for C, C++ and JavaScript; other target
+compilers were unavailable. Java/Go external self-test cases were explicit skips.
+
+The app remains a finite educational interpreter/converter. Portable exports
+require homogeneous fixed collections and scalar defaults. Mutable defaults,
+slices, dynamic resizing and general sorting/reversal remain unsupported.
+Target numeric widths/rounding and runtime-changing numeric types can differ
+from Python. Details are in Help > Capabilities. Native library calls are atomic
+and process desktop controls when they return.
